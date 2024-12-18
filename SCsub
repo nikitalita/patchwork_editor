@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 from subprocess import Popen, PIPE, check_output
+import glob
 
 Import("env")
 Import("env_modules")
@@ -33,7 +34,8 @@ env_patchwork_editor.Append(CPPPATH=["external/include"])
 # automerge stuff
 
 MODULE_DIR = os.path.realpath(".")
-AUTOMERGE_C_DIR_PREFIX = "thirdparty/automerge/rust/automerge-c"
+AUTOMERGE_PREFIX = "thirdparty/automerge"
+AUTOMERGE_C_DIR_PREFIX = AUTOMERGE_PREFIX + "/rust/automerge-c"
 AUTOMERGE_C_DIR = os.path.join(MODULE_DIR, AUTOMERGE_C_DIR_PREFIX)
 AUTOMERGE_C_BUILD_DIR = os.path.join(AUTOMERGE_C_DIR, "build")
 EXTERNAL_DIR = os.path.join(MODULE_DIR, "external")
@@ -63,9 +65,35 @@ def automerge_builder(target, source, env):
 env_patchwork_editor["BUILDERS"]["AutomergeBuilder"] = Builder(
     action=automerge_builder,
     suffix=".a",
-    src_suffix=["*.h"],
+    src_suffix=["*.h", "*.rs", "*.txt"],
 )
-automerge_sources = Glob(AUTOMERGE_C_DIR_PREFIX + "/include/automerge-c/utils/*.h")
+
+
+def get_automerge_sources():
+    abs_path = os.path.join(MODULE_DIR, AUTOMERGE_PREFIX)
+    # check if abs_path exists
+    if not os.path.exists(abs_path):
+        raise Exception(
+            f"Path {abs_path} does not exist, please run `git submodule update --init --recursive` in the patchwork_editor directory"
+        )
+    sources = (
+        glob.glob(
+            abs_path + "/**/*.h",
+            recursive=True,
+        )
+        + glob.glob(
+            abs_path + "/**/*.rs",
+            recursive=True,
+        )
+        + glob.glob(
+            abs_path + "/**/CMakeLists.txt",
+            recursive=True,
+        )
+    )
+    return [os.path.relpath(source, MODULE_DIR) for source in sources]
+
+
+automerge_sources = get_automerge_sources()
 
 env_patchwork_editor.Alias(
     "automergelib",
