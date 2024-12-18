@@ -33,7 +33,7 @@ env_patchwork_editor.Append(CPPPATH=["external/include"])
 # automerge stuff
 
 MODULE_DIR = os.path.realpath(".")
-AUTOMERGE_C_DIR_PREFIX = "automerge/rust/automerge-c"
+AUTOMERGE_C_DIR_PREFIX = "thirdparty/automerge/rust/automerge-c"
 AUTOMERGE_C_DIR = os.path.join(MODULE_DIR, AUTOMERGE_C_DIR_PREFIX)
 AUTOMERGE_C_BUILD_DIR = os.path.join(AUTOMERGE_C_DIR, "build")
 EXTERNAL_DIR = os.path.join(MODULE_DIR, "external")
@@ -43,11 +43,6 @@ AUTOMERGE_LIBS = ["external/lib/libautomerge.a", "external/lib/libautomerge_core
 
 
 def automerge_builder(target, source, env):
-    # we want to run the following commands:
-    # cmake -E make_directory automerge/rust/automerge-c/build
-    # cmake -S automerge/rust/automerge-c -B automerge/rust/automerge-c/build -DUTF32_INDEXING=true
-    # cmake --build automerge/rust/automerge-c/build
-    # cmake --install automerge/rust/automerge-c/build --prefix "/usr/local"
     output = bytes()
     try:
         output += check_output(["cmake", "-E", "make_directory", EXTERNAL_DIR]) + b"\n"
