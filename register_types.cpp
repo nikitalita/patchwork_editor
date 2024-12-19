@@ -13,8 +13,9 @@ void patchwork_editor_init_callback() {
 
 void initialize_patchwork_editor_module(ModuleInitializationLevel p_level) {
 	// Engine::get_singleton()->add_singleton(Engine::Singleton("GDRESettings", GDRESettings::get_singleton()));
-
-	EditorNode::add_init_callback(&patchwork_editor_init_callback);
+	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
+		EditorNode::add_init_callback(&patchwork_editor_init_callback);
+	}
 }
 
 void uninitialize_patchwork_editor_module(ModuleInitializationLevel p_level) {
