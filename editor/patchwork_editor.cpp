@@ -1,8 +1,9 @@
 #include "patchwork_editor.h"
-#include "automerge-c/automerge.h"
-#include "automerge-c/utils/stack.h"
-#include "automerge-c/utils/stack_callback_data.h"
-
+extern "C" {
+#include <automerge-c/automerge.h>
+#include <automerge-c/utils/stack.h>
+#include <automerge-c/utils/stack_callback_data.h>
+}
 PatchworkEditor::PatchworkEditor() {
 }
 

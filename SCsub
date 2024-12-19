@@ -9,10 +9,18 @@ import glob
 Import("env")
 Import("env_modules")
 
+
+MODULE_DIR = os.path.realpath(".")
+EXTERNAL_DIR = os.path.join(MODULE_DIR, "external")
+EXTERNAL_LIB_DIR = os.path.join(EXTERNAL_DIR, "lib")
+
+
 env_patchwork_editor = env_modules.Clone()
+env_patchwork_editor["disable_exceptions"] = False
 
 env_patchwork_editor.Append(CPPPATH=["."])
 env_patchwork_editor.Append(CPPPATH=["external/include"])
+env.Append(LIBPATH=[EXTERNAL_LIB_DIR])
 
 # icon stuff
 
@@ -33,79 +41,78 @@ env_patchwork_editor.Append(CPPPATH=["external/include"])
 
 # automerge stuff
 
-MODULE_DIR = os.path.realpath(".")
-AUTOMERGE_PREFIX = "thirdparty/automerge"
-AUTOMERGE_C_DIR_PREFIX = AUTOMERGE_PREFIX + "/rust/automerge-c"
-AUTOMERGE_C_DIR = os.path.join(MODULE_DIR, AUTOMERGE_C_DIR_PREFIX)
-AUTOMERGE_C_BUILD_DIR = os.path.join(AUTOMERGE_C_DIR, "build")
-EXTERNAL_DIR = os.path.join(MODULE_DIR, "external")
 
-EXTERNAL_LIB_DIR = os.path.join(EXTERNAL_DIR, "lib")
-AUTOMERGE_LIBS = ["external/lib/libautomerge.a", "external/lib/libautomerge_core.a"]
-
-
-def automerge_builder(target, source, env):
-    output = bytes()
-    try:
-        output += check_output(["cmake", "-E", "make_directory", EXTERNAL_DIR]) + b"\n"
-        output += check_output(["cmake", "-E", "make_directory", AUTOMERGE_C_BUILD_DIR]) + b"\n"
-        output += (
-            check_output(["cmake", "-S", AUTOMERGE_C_DIR, "-B", AUTOMERGE_C_BUILD_DIR, "-DUTF32_INDEXING=true"]) + b"\n"
+def get_sources(rel_path, filters=["*.h", "*.hpp", "*.cpp"]):
+    abs_path = os.path.join(MODULE_DIR, rel_path)
+    # check if abs_path exists
+    if not os.path.exists(abs_path):
+        raise Exception(
+            f"Path {abs_path} does not exist, please run `git submodule update --init --recursive` in the patchwork_editor directory"
         )
-        output += check_output(["cmake", "--build", AUTOMERGE_C_BUILD_DIR]) + b"\n"
-        output += check_output(["cmake", "--install", AUTOMERGE_C_BUILD_DIR, "--prefix", EXTERNAL_DIR]) + b"\n"
+    sources = []
+    for suffix in filters:
+        globstr = os.path.join(abs_path, "**", suffix)
+        sources += glob.glob(globstr, recursive=True)
+    return [os.path.relpath(source, MODULE_DIR) for source in sources]
+
+
+def cmake_builder(external_dir, source_dir, build_dir, config_options=None):
+    output = bytes()
+    Config_cmd = ["cmake", "-S", source_dir, "-B", build_dir]
+    if config_options:
+        Config_cmd += config_options
+    try:
+        output += check_output(["cmake", "-E", "make_directory", external_dir]) + b"\n"
+        output += check_output(["cmake", "-E", "make_directory", build_dir]) + b"\n"
+        output += check_output(Config_cmd) + b"\n"
+        output += check_output(["cmake", "--build", build_dir]) + b"\n"
+        output += check_output(["cmake", "--install", build_dir, "--prefix", external_dir]) + b"\n"
     except Exception as e:
         # convert output to string
         output = output.decode("utf-8")
         print(f"Failed to build automerge-c: {e}")
         print(f"Output: {output}")
         exit(1)
+    # output = output.decode("utf-8")
+    # print(output)
 
 
-env_patchwork_editor["BUILDERS"]["AutomergeBuilder"] = Builder(
-    action=automerge_builder,
-    suffix=".a",
-    src_suffix=["*.h", "*.rs", "*.txt"],
-)
+def add_libs_to_env(libs, sources):
+    for lib in libs:
+        env_patchwork_editor.Depends(lib, sources)
+        # get the basename of the library minus the extension
+        lib_name = os.path.basename(lib).split(".")[0]
+        full_lib_path = os.path.join(MODULE_DIR, lib)
+        env.Append(LIBS=[lib_name])
 
 
-def get_automerge_sources():
-    abs_path = os.path.join(MODULE_DIR, AUTOMERGE_PREFIX)
-    # check if abs_path exists
-    if not os.path.exists(abs_path):
-        raise Exception(
-            f"Path {abs_path} does not exist, please run `git submodule update --init --recursive` in the patchwork_editor directory"
-        )
-    sources = (
-        glob.glob(
-            abs_path + "/**/*.h",
-            recursive=True,
-        )
-        + glob.glob(
-            abs_path + "/**/*.rs",
-            recursive=True,
-        )
-        + glob.glob(
-            abs_path + "/**/CMakeLists.txt",
-            recursive=True,
-        )
+AUTOMERGE_PREFIX = "thirdparty/automerge"
+AUTOMERGE_C_DIR_PREFIX = AUTOMERGE_PREFIX + "/rust/automerge-c"
+AUTOMERGE_C_DIR = os.path.join(MODULE_DIR, AUTOMERGE_C_DIR_PREFIX)
+AUTOMERGE_C_BUILD_DIR = os.path.join(AUTOMERGE_C_DIR, "build")
+AUTOMERGE_LIBS = ["external/lib/libautomerge.a", "external/lib/libautomerge_core.a"]
+AUTOMERGE_CONFIG_OPTS = ["-DUTF32_INDEXING=true"]
+
+
+def automerge_builder(target, source, env):
+    cmake_builder(EXTERNAL_DIR, AUTOMERGE_C_DIR, AUTOMERGE_C_BUILD_DIR, AUTOMERGE_CONFIG_OPTS)
+
+
+def build_automerge(module_obj):
+    env_patchwork_editor["BUILDERS"]["AutomergeBuilder"] = Builder(
+        action=automerge_builder,
+        suffix=".a",
+        src_suffix=["*.h", "*.rs", "*.txt"],
     )
-    return [os.path.relpath(source, MODULE_DIR) for source in sources]
 
+    automerge_sources = get_sources(AUTOMERGE_PREFIX, ["*.h", "*.rs", "CMakeLists.txt"])
+    env_patchwork_editor.Alias(
+        "automergelib",
+        [env_patchwork_editor.AutomergeBuilder(AUTOMERGE_LIBS, automerge_sources)],
+    )
+    add_libs_to_env(AUTOMERGE_LIBS, automerge_sources)
+    env.Depends(module_obj, AUTOMERGE_LIBS)
 
-automerge_sources = get_automerge_sources()
-
-env_patchwork_editor.Alias(
-    "automergelib",
-    [env_patchwork_editor.AutomergeBuilder(AUTOMERGE_LIBS, automerge_sources)],
-)
-env.Append(LIBPATH=[EXTERNAL_LIB_DIR])
-for lib in AUTOMERGE_LIBS:
-    env_patchwork_editor.Depends(lib, automerge_sources)
-    # get the basename of the library minus the extension
-    lib_name = os.path.basename(lib).split(".")[0]
-    full_lib_path = os.path.join(MODULE_DIR, lib)
-    env.Append(LIBS=[lib_name])
 
 def doproc(cmd):
     # ensure that it doesn't print stderr to the terminal if print_err is False
@@ -195,5 +202,5 @@ module_obj = []
 
 env_patchwork_editor.add_source_files(module_obj, "*.cpp")
 env_patchwork_editor.add_source_files(module_obj, "editor/*.cpp")
+build_automerge(module_obj)
 env.modules_sources += module_obj
-env.Depends(module_obj, AUTOMERGE_LIBS)
