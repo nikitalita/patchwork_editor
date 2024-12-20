@@ -99,37 +99,11 @@ def add_libs_to_env(module_obj, libs, sources):
     env.Depends(module_obj, libs)
 
 
-AUTOMERGE_PREFIX = "thirdparty/automerge"
-AUTOMERGE_C_DIR_PREFIX = AUTOMERGE_PREFIX + "/rust/automerge-c"
-AUTOMERGE_C_DIR = os.path.join(MODULE_DIR, AUTOMERGE_C_DIR_PREFIX)
-AUTOMERGE_C_BUILD_DIR = os.path.join(AUTOMERGE_C_DIR, "build")
-AUTOMERGE_LIBS = ["external/lib/libautomerge.a", "external/lib/libautomerge_core.a"]
-AUTOMERGE_CONFIG_OPTS = ["-DUTF32_INDEXING=true"]
-
-
-def automerge_builder(target, source, env):
-    cmake_builder(EXTERNAL_DIR, AUTOMERGE_C_DIR, AUTOMERGE_C_BUILD_DIR, AUTOMERGE_LIBS, AUTOMERGE_CONFIG_OPTS)
-
-
-def build_automerge(module_obj):
-    env_patchwork_editor["BUILDERS"]["AutomergeBuilder"] = Builder(
-        action=automerge_builder,
-        suffix=".a",
-        src_suffix=["*.h", "*.rs", "*.txt"],
-    )
-
-    automerge_sources = get_sources(AUTOMERGE_PREFIX, ["*.h", "*.rs", "CMakeLists.txt"])
-    env_patchwork_editor.Alias(
-        "automergelib",
-        [env_patchwork_editor.AutomergeBuilder(AUTOMERGE_LIBS, automerge_sources)],
-    )
-    add_libs_to_env(module_obj, AUTOMERGE_LIBS, automerge_sources)
-
-
 PATCHWORK_RUST_PREFIX = "thirdparty/patchwork_rust"
 PATCHWORK_RUST_DIR = os.path.join(MODULE_DIR, PATCHWORK_RUST_PREFIX)
 PATCHWORK_RUST_BUILD_DIR = os.path.join(PATCHWORK_RUST_DIR, "build")
 PATCHWORK_LIBS = ["external/lib/libpatchwork_rust.a", "external/lib/libpatchwork_rust_core.a"]
+AUTOMERGE_CONFIG_OPTS = ["-DUTF32_INDEXING=true"]
 
 
 def patchwork_rust_builder(target, source, env):
@@ -240,6 +214,5 @@ module_obj = []
 
 env_patchwork_editor.add_source_files(module_obj, "*.cpp")
 env_patchwork_editor.add_source_files(module_obj, "editor/*.cpp")
-# build_automerge(module_obj)
 build_patchwork_rust(module_obj)
 env.modules_sources += module_obj

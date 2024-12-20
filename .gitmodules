@@ -1,3 +1,0 @@
-[submodule "thirdparty/automerge"]
-	path = thirdparty/automerge
-	url = https://github.com/automerge/automerge
