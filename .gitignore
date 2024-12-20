@@ -325,3 +325,6 @@ standalone/character*
 
 # external includes and libs that are built
 external/*
+
+.idea/
+cmake-build-*/
