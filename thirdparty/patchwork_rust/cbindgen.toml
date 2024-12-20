@@ -6,14 +6,7 @@ after_includes = """\n
 
 
 #ifdef __cplusplus
-class String;
-class Variant;
-using GString = String;
 extern "C" {
-#else
-typedef struct String String;
-typedef struct Variant Variant;
-typedef String GString;
 #endif
 """
 autogen_warning = """

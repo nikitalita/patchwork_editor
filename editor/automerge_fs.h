@@ -1,4 +1,3 @@
-// C++ implementation of AutomergeFS, called AutomergeFSWrapper:
 #pragma once
 #include "core/string/print_string.h"
 #include "core/variant/variant.h"

@@ -19,8 +19,8 @@ struct PatchWithScene {
     scene: PackedGodotScene,
 }
 // #[godot_api]
+// alas, We can't use Godot types because the rust godot library binds to the godot api.
 // type AutoMergeSignalCallback = extern "C" fn(*mut c_void, *const std::os::raw::c_char, *const Variant, usize) -> ();
-// like the above, but with strings instead of Variants 
 type AutoMergeSignalCallback = extern "C" fn(*mut c_void, *const std::os::raw::c_char, *const *const std::os::raw::c_char, usize) -> ();
 
 // #[derive(GodotClass)]
@@ -324,7 +324,6 @@ impl AutomergeFS {
 // C FFI functions for AutomergeFS
 
 #[no_mangle]
-// return a const char * string
 pub extern "C" fn automerge_fs_get_fs_doc_id(automerge_fs: *const AutomergeFS) -> *const std::os::raw::c_char { 
     let automerge_fs = unsafe { &*automerge_fs };
     let fs_doc_id = automerge_fs.get_fs_doc_id();
@@ -332,7 +331,7 @@ pub extern "C" fn automerge_fs_get_fs_doc_id(automerge_fs: *const AutomergeFS) -
     c_string.into_raw()
 }
 
-// free const char * string
+// free const char * string; rust docs explicitly say you shouldn't attempt to call stdlib's free on a rust-allocated string
 #[no_mangle]
 pub extern "C" fn automerge_fs_free_string(s: *const std::os::raw::c_char) {
     unsafe {
@@ -397,10 +396,3 @@ pub extern "C" fn automerge_fs_destroy(automerge_fs: *mut AutomergeFS) {
         drop(Box::from_raw(automerge_fs));
     }
 }
-
-
-
-// #[no_mangle]
-// pub extern "C" fn thingy( foo: Variant){
-//     println!("thingy");
-// }
