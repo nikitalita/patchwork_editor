@@ -98,13 +98,20 @@ impl AutomergeFS {
         let repo_handle_clone = repo_handle.clone();
         runtime.spawn(async move {
             println!("start a client");
-
+            let mut refused = false;
             // Start a client.
             let stream = loop {
                 // Try to connect to a peer
                 let res = TcpStream::connect(SERVER_URL).await;
                 if let Err(e) = res {
-                    println!("error connecting: {:?}", e);
+                    if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                        if !refused {
+                            println!("connection refused, retrying...");
+                            refused = true;
+                        }
+                    } else {
+                        println!("error connecting: {:?}", e);
+                    }
                     continue;
                 }
                 break res.unwrap();
@@ -264,11 +271,30 @@ impl AutomergeFS {
         let fs_doc_id = self.fs_doc_id.clone();
         let sender = self.sender.clone();
         self.runtime.spawn(async move {
-            let doc_handle = repo_handle_change_listener
-                .request_document(fs_doc_id)
-                .await
-                .unwrap();
-
+            let mut doc_handle_result;
+            loop {
+                let cloned_fs_doc_id = fs_doc_id.clone();
+                doc_handle_result = repo_handle_change_listener
+                    .request_document(cloned_fs_doc_id)
+                    .await
+                ;
+                if doc_handle_result.is_err() {
+                    if let Some(e) = doc_handle_result.err() {
+                        match e {
+                            automerge_repo::RepoError::Shutdown => {
+                                println!("RepoError::Shutdown");
+                                return;
+                            }
+                            _ => {
+                                println!("Error: {:?}", e);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                break;
+            }
+            let doc_handle = doc_handle_result.unwrap();
             let mut heads: Vec<ChangeHash> = vec![];
 
             loop {
@@ -358,7 +384,7 @@ pub extern "C" fn automerge_fs_create(
 
 #[no_mangle]
 pub extern "C" fn automerge_fs_stop(automerge_fs: *mut AutomergeFS) {
-    let automerge_fs = unsafe { Box::from_raw(automerge_fs) };
+    let automerge_fs = unsafe { &mut *automerge_fs };
     automerge_fs.stop();
 }
 
@@ -376,7 +402,7 @@ pub extern "C" fn automerge_fs_start(automerge_fs: *const AutomergeFS) {
 
 #[no_mangle]
 pub extern "C" fn automerge_fs_save(
-    automerge_fs: *const AutomergeFS, path: *const std::os::raw::c_char, content: *const std::os::raw::c_char, content_len: usize ) {
+    automerge_fs: *const AutomergeFS, path: *const std::os::raw::c_char, content: *const std::os::raw::c_char, _content_len: usize) {
     let automerge_fs = unsafe { &*automerge_fs };
     let path = unsafe { std::ffi::CStr::from_ptr(path) }
         .to_str()
