@@ -13,6 +13,9 @@ private:
 	void _on_filesystem_changed();
 	void _on_resources_reloaded();
 	void _on_history_changed();
+	void handle_change(const String &resource_path, const NodePath &node_path, HashMap<String, Variant> properties);
+	void _on_file_changed(Dictionary dict);
+
 protected:
 	void _notification(int p_what);
 public:

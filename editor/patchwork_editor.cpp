@@ -50,6 +50,23 @@ void PatchworkEditor::_on_history_changed() {
 	DirAccess::remove_absolute(temp_file);
 }
 
+void PatchworkEditor::handle_change(const String &resource_path, const NodePath &node_path, HashMap<String, Variant> properties) {
+	auto res = ResourceLoader::load(resource_path);
+	if (!node_path.is_empty()) {
+		Ref<PackedScene> scene = res;
+		auto node_idx = scene->get_state()->find_node_by_path(node_path);
+	}
+}
+
+void PatchworkEditor::_on_file_changed(Dictionary dict) {
+	// let args = ["file_path", "res://main.tscn",
+	// "node_path", node_path.as_str(),
+	// "type", "node_deleted",
+	// ];
+	auto file_path = dict["file_path"];
+	auto node_path = dict["node_path"];
+}
+
 void PatchworkEditor::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_READY: {
