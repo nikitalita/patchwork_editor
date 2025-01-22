@@ -4,7 +4,7 @@ void AutomergeFSWrapper::_signal_callback(void *signal_user_data, const char *si
 	Dictionary dictionary;
 	ERR_FAIL_COND_MSG(args_len % 2 != 0, "Expected an even number of arguments");
 	for (size_t i = 0; i < args_len; i += 2) {
-		dictionary[String(args[i])] = String(args[i + 1]);
+		dictionary[String::utf8(args[i])] = String::utf8(args[i + 1]);
 	}
 	auto self = static_cast<AutomergeFSWrapper *>(signal_user_data);
 	self->signal_callback(signal, dictionary);
