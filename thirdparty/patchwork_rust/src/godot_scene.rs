@@ -4,9 +4,16 @@ use tree_sitter::{Parser, Query, QueryCursor};
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 pub struct PackedGodotScene {
-    // todo: parse  resources and connections
+    attributes: HashMap<String, String>,
     nodes: HashMap<String, GodotSceneNode>,
     external_resources: HashMap<String, GodotSceneNode>,
+    internal_resources: HashMap<String, GodotSceneNode>,
+    connections: HashMap<String, GodotSceneConnections>
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+pub struct GodotSceneConnections {
+    attributes: HashMap<String, String>, // key value pairs in the header of the section
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
@@ -92,8 +99,11 @@ pub fn parse(source: &String) -> Result<PackedGodotScene, String> {
             let mut query_cursor = QueryCursor::new();
             let matches = query_cursor.matches(&query, tree.root_node(), content_bytes);
             let mut scene = PackedGodotScene {
+                attributes: HashMap::new(),
                 nodes: HashMap::new(),
                 external_resources: HashMap::new(),
+                internal_resources: HashMap::new(),
+                connections: HashMap::new(),
             };
 
             for m in matches {
@@ -164,6 +174,31 @@ pub fn parse(source: &String) -> Result<PackedGodotScene, String> {
                         let id = raw_id.to_string()[1..raw_id.len() - 1].to_string();
 
                         scene.external_resources.insert(id, node_clone);
+                    }
+                } else if section_id == "connection" {
+                    let connections = GodotSceneConnections {
+                        attributes: attributes_clone.clone(),
+                    };
+
+                    let mut connection_id = String::new();
+                    if let Some(signal) = connections.attributes.get("signal") {
+                        connection_id.push_str(signal);
+                    }
+                    if let Some(target) = connections.attributes.get("target") {
+                        connection_id.push_str(target);
+                    }
+                    if let Some(method) = connections.attributes.get("method") {
+                        connection_id.push_str(method);
+                    }
+
+                    scene.connections.insert(connection_id, connections);
+                } else if section_id == "subresource" {
+                    let node_clone = node.clone();
+                    if let Some(raw_id) = attributes_clone.get("id") {
+                        let id = raw_id.to_string()[1..raw_id.len() - 1].to_string();
+                        scene.internal_resources.insert(id, node_clone);
+                    } else {
+                        // something? internal resources always have an id
                     }
                 }
             }
