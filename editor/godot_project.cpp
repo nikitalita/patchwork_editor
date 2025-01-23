@@ -37,8 +37,10 @@ void GodotProjectWrapper::create(const String &p_maybe_fs_doc_id) {
 }
 
 GodotProjectWrapper::~GodotProjectWrapper() {
-	godot_project_stop(fs);
-	godot_project_destroy(fs);
+	if (fs != nullptr) {
+		godot_project_stop(fs);
+		godot_project_destroy(fs);
+	}
 }
 
 void GodotProjectWrapper::process() {

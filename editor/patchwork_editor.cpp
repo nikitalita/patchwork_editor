@@ -82,7 +82,7 @@ PatchworkEditor::PatchworkEditor(EditorNode *p_editor) {
 	editor = p_editor;
 	EditorUndoRedoManager::get_singleton()->connect(SNAME("history_changed"), callable_mp(this, &PatchworkEditor::_on_history_changed));
 
-	fs = GodotProjectWrapper::instance_and_create(PW_PROJECT_URL);
+	fs = GodotProjectWrapper::instance_and_create("");
 	this->add_child(fs);
 	// EditorFileSystem::get_singleton()->connect("filesystem_changed", callable_mp(this, &PatchworkEditor::signal_callback));
 }

@@ -12,6 +12,7 @@ class GodotProjectWrapper : public Node {
 
 public:
 	static GodotProjectWrapper *instance_and_create(const String &maybe_fs_doc_id);
+	// Don't use this, uses instance_and_create instead
 	GodotProjectWrapper();
 	~GodotProjectWrapper();
 
