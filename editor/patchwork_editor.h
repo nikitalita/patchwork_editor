@@ -2,14 +2,14 @@
 #include "core/object/class_db.h"
 #include "editor/editor_node.h"
 #include "scene/main/node.h"
-class AutomergeFSWrapper;
+class GodotProjectWrapper;
 
 class PatchworkEditor : public Node {
 	GDCLASS(PatchworkEditor, Node);
 
 private:
 	EditorNode *editor = nullptr;
-	AutomergeFSWrapper *fs = nullptr;
+	GodotProjectWrapper *fs = nullptr;
 	void _on_filesystem_changed();
 	void _on_resources_reloaded();
 	void _on_history_changed();

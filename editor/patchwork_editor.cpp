@@ -1,10 +1,10 @@
 #include "patchwork_editor.h"
-#include "automerge_fs.h"
+#include "godot_project.h"
 
-#include <core/variant/variant.h>
+#include <core/io/file_access.h>
 #include <core/io/json.h>
 #include <core/io/resource_loader.h>
-#include <core/io/file_access.h>
+#include <core/variant/variant.h>
 #include <editor/editor_file_system.h>
 #include <editor/editor_undo_redo_manager.h>
 #include <scene/resources/packed_scene.h>
@@ -43,7 +43,7 @@ void PatchworkEditor::_on_history_changed() {
 		auto contents = file->get_as_text();
 		auto scene_path = scene->get_scene_file_path();
 		if (scene_path == "res://main.tscn") {
-			fs->save(scene->get_scene_file_path(), contents);
+			fs->save_file(scene->get_scene_file_path(), contents);
 		}
 		file->close();
 	}
@@ -80,10 +80,9 @@ void PatchworkEditor::_notification(int p_what) {
 
 PatchworkEditor::PatchworkEditor(EditorNode *p_editor) {
 	editor = p_editor;
+	EditorUndoRedoManager::get_singleton()->connect(SNAME("history_changed"), callable_mp(this, &PatchworkEditor::_on_history_changed));
 
-	fs = AutomergeFSWrapper::instance_and_create(PW_PROJECT_URL);
+	fs = GodotProjectWrapper::instance_and_create(PW_PROJECT_URL);
 	this->add_child(fs);
 	// EditorFileSystem::get_singleton()->connect("filesystem_changed", callable_mp(this, &PatchworkEditor::signal_callback));
-	EditorUndoRedoManager::get_singleton()->connect(SNAME("history_changed"), callable_mp(this, &PatchworkEditor::_on_history_changed));
-	fs->start();
 }
