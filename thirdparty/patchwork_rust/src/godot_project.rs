@@ -279,10 +279,10 @@ impl GodotProject {
     // #[func]
     fn stop(&self) {
         // todo: is this right?
-        unsafe {
-            let runtime = std::ptr::read(&self.runtime);
-            runtime.shutdown_background();
-        }
+        // unsafe {
+        //     let runtime = std::ptr::read(&self.runtime);
+        //     runtime.shutdown_background();
+        // }
     }
 
     // #[func]

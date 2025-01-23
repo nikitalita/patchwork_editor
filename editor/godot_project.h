@@ -4,6 +4,7 @@
 #include "patchwork_rust/patchwork_rust.h"
 #include "scene/main/node.h"
 
+
 class GodotProjectWrapper : public Node {
 	GDCLASS(GodotProjectWrapper, Node);
 
