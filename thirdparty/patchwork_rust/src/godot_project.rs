@@ -9,18 +9,30 @@ use std::{
 
 use automerge::{transaction::Transactable, Automerge, ChangeHash, ObjType, ReadDoc, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
-use autosurgeon::{hydrate, reconcile, Hydrate, Reconcile};
+use autosurgeon::{bytes, hydrate, reconcile, Hydrate, Reconcile};
 use futures::StreamExt;
 use std::ffi::c_void;
 use std::os::raw::c_char;
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
 
-use crate::{doc_state_map::DocStateMap, doc_handle_map::DocHandleMap};
+use crate::{doc_state_map::DocStateMap, doc_utils::SimpleDocReader, doc_handle_map::DocHandleMap};
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+struct BinaryFile {
+    content: Vec<u8>,
+}
+
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+struct FileEntry {
+    content: Option<String>,
+    url: Option<String>,
+}
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 struct GodotProjectDoc {
-    files: HashMap<String, String>,
+    files: HashMap<String, FileEntry>,
 }
 
 type AutoMergeSignalCallback = extern "C" fn(*mut c_void, *const std::os::raw::c_char, *const *const std::os::raw::c_char, usize) -> ();
@@ -41,6 +53,13 @@ struct Branch {
 #[derive(Clone)]
 enum SyncEvent {
     DocChanged { doc_id: DocumentId },
+}
+
+
+#[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
+pub enum StringOrPackedByteArray {
+    String(String),
+    PackedByteArray(Vec<u8>),
 }
 
 // #[derive(GodotClass)]
@@ -336,14 +355,16 @@ impl GodotProject {
     //         .get_doc(&self.get_checked_out_doc_id())
     //         .unwrap_or_else(|| panic!("Failed to get checked out doc"));
 
-    //     let project_doc: GodotProjectDoc =
-    //         hydrate(&doc).unwrap_or_else(|e| panic!("Failed to hydrate project doc: {:?}", e));
-
-    //     project_doc
-    //         .files
-    //         .keys()
-    //         .map(|k| k.to_variant())
-    //         .collect::<Array<Variant>>()
+    // let files = match doc.get_obj_id(ROOT, "files") {
+    // Some(files) => files,
+    // _ => {
+    // return array![];
+    // }
+    // };
+    // 
+    // 
+    // let keys = doc.keys(files).collect::<Vec<String>>();
+    // return keys.into_iter().map(|k| k.to_variant()).collect::<Array<Variant>>();
     // }
     // #[func]
     fn list_all_files(&self) -> Vec<String> /* String[] */ {
@@ -352,14 +373,14 @@ impl GodotProject {
             .get_doc(&self.get_checked_out_doc_id())
             .unwrap_or_else(|| panic!("Failed to get checked out doc"));
 
-        let project_doc: GodotProjectDoc =
-            hydrate(&doc).unwrap_or_else(|e| panic!("Failed to hydrate project doc: {:?}", e));
 
-        project_doc
-            .files
-            .keys()
-            .map(|k| k.clone())
-            .collect::<Vec<String>>()
+        let files = match doc.get_obj_id(ROOT, "files") {
+            Some(files) => files,
+            _ => {
+                return vec![];
+            }
+        };
+        doc.keys(files).collect::<Vec<String>>()
     }
 
     // #[func]
@@ -369,14 +390,52 @@ impl GodotProject {
     //         .get_doc(&self.get_checked_out_doc_id())
     //         .unwrap_or_else(|| panic!("Failed to get checked out doc"));
 
-    //     let files = doc.get(ROOT, "files").unwrap().unwrap().1;
 
-    //     return match doc.get(files, path) {
-    //         Ok(Some((value, _))) => value.into_string().unwrap_or_default().to_variant(),
-    //         _ => Variant::nil(),
-    //     };
+    // does the file exist?
+    // let file_entry = match doc.get(files, path) {
+    // Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
+    // _ => return Variant::nil(),
+    // };
+    // 
+    // 
+    // // try to read file as text
+    // match doc.get(&file_entry, "content") {
+    // Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
+    // match doc.text(content) {
+    // Ok(text) => return text.to_variant(),
+    // Err(_) => {}
     // }
-    fn get_file(&self, path: String) -> Option<String>  {
+    // },
+    // _ => {}
+    // }
+    // 
+    // // ... otherwise try to read as linked binary doc
+    // 
+    // 
+    // if let Some(url) = doc.get_string(&file_entry, "url") {
+    // 
+    // // parse doc url
+    // let doc_id = match parse_automerge_url(&url) {
+    // Some(url) => url,
+    // _ => return Variant::nil()
+    // };
+    // 
+    // // read content doc
+    // let content_doc = match self.doc_state_map.get_doc(&doc_id) {
+    // Some(doc) => doc,
+    // _ => return Variant::nil()
+    // };
+    // 
+    // // get content of binary file
+    // if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
+    // return bytes.to_variant()
+    // };
+    // };
+    // 
+    // // finally give up
+    // return Variant::nil()
+    // }
+    fn get_file(&self, path: String) -> Option<StringOrPackedByteArray> {
         let doc = self
             .doc_state_map
             .get_doc(&self.get_checked_out_doc_id())
@@ -384,10 +443,50 @@ impl GodotProject {
 
         let files = doc.get(ROOT, "files").unwrap().unwrap().1;
 
-        return match doc.get(files, path) {
-            Ok(Some((value, _))) => Some(value.into_string().unwrap_or_default()),
-            _ => None,
+
+        // does the file exist?
+        let file_entry = match doc.get(files, path) {
+            Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
+            _ => return None,
         };
+
+
+        // try to read file as text
+        match doc.get(&file_entry, "content") {
+            Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
+                match doc.text(content) {
+                    Ok(text) => return Some(StringOrPackedByteArray::String(text.to_string())),
+                    Err(_) => {}
+                }
+            },
+            _ => {}
+        }
+
+        // ... otherwise try to read as linked binary doc
+
+
+        if let Some(url) = doc.get_string(&file_entry, "url") {
+
+            // parse doc url
+            let doc_id = match parse_automerge_url(&url) {
+                Some(url) => url,
+                _ => return None
+            };
+
+            // read content doc
+            let content_doc = match self.doc_state_map.get_doc(&doc_id) {
+                Some(doc) => doc,
+                _ => return None
+            };
+
+            // get content of binary file
+            if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
+                return Some(StringOrPackedByteArray::PackedByteArray(bytes));
+            };
+        };
+
+        // finally give up
+        return None
     }
 
 
@@ -459,7 +558,7 @@ impl GodotProject {
     }
 
     // #[func]
-    fn save_file(&self, path: String, content: String) {
+    fn save_file(&self, path: String, content: StringOrPackedByteArray) {
         let path_clone = path.clone();
         let checked_out_doc_id = self.get_checked_out_doc_id();
         let checked_out_doc_id_clone = checked_out_doc_id.clone();
@@ -475,11 +574,44 @@ impl GodotProject {
                     _ => panic!("Invalid project doc, doesn't have files map"),
                 };
 
-                if let Err(e) = tx.put(files, path, content) {
-                    panic!("Failed to save file: {:?}", e);
+                match content {
+                    StringOrPackedByteArray::String(content) => {
+                        println!("write string {:}", path);
+
+                        // get existing file url or create new one                        
+                        let file_entry = match tx.get(&files, &path) {
+                            Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
+                            _ => tx.put_object(files, &path, ObjType::Map).unwrap()
+                        };
+
+                        // delete url in file entry if it previously had one
+                        if let Ok(Some((_, _))) = tx.get(&file_entry, "url") {
+                            let _ = tx.delete(&file_entry, "url");
+                        }
+
+                        // either get existing text or create new text
+                        let content_key = match tx.get(&file_entry, "content") {
+                            Ok(Some((automerge::Value::Object(ObjType::Text), content))) => content,
+                            _ => tx.put_object(&file_entry, "content", ObjType::Text).unwrap(),
+                        };
+                        let _ = tx.update_text(&content_key, &content);
+                    },
+                    StringOrPackedByteArray::PackedByteArray(content) => {
+                        println!("write binary {:}", path);
+
+                        // create content doc
+                        let content_doc_id = self.create_doc(|d| {
+                            let mut tx = d.transaction();
+                            let _ = tx.put(ROOT, "content", content.to_vec());
+                            tx.commit();
+                        });
+
+                        // write url to content doc into project doc
+                        let file_entry = tx.put_object(files, path, ObjType::Map);
+                        let _ = tx.put(file_entry.unwrap(), "url", format!("automerge:{}", content_doc_id));
+                    },
                 }
 
-                println!("save {:?}", path_clone);
 
                 tx.commit();
             });
@@ -631,7 +763,10 @@ impl GodotProject {
     // needs to be called every frame to process the internal events
     // #[func]
     fn process(&mut self) {
-        let checked_out_doc_id = self.checked_out_doc_id.lock().unwrap().clone().unwrap();
+        let checked_out_doc_id = match self.checked_out_doc_id.lock().unwrap().clone() {
+            Some(id) => id,
+            None => return,
+        };
 
         // Process all pending sync events
         while let Ok(event) = self.sync_event_receiver.try_recv() {
@@ -788,6 +923,21 @@ impl GodotProject {
         }
     }
 
+    fn create_doc<F>(&self, f: F) -> DocumentId
+    where
+        F: FnOnce(&mut Automerge),
+    {
+        let doc_handle = self.repo_handle.new_document();
+        let doc_id = doc_handle.document_id();
+
+        self.doc_handle_map.add_handle(doc_handle.clone());
+
+        self.update_doc(doc_id.clone(), f);
+
+        doc_id
+    }
+
+
     fn request_doc(&self, doc_id: DocumentId) {
         let repo_handle = self.repo_handle.clone();
         let doc_state_map = self.doc_state_map.clone();
@@ -859,6 +1009,19 @@ fn handle_changes(handle: DocHandle) -> impl futures::Stream<Item = Vec<automerg
 }
 
 
+fn parse_automerge_url(url: &str) -> Option<DocumentId> {
+    const PREFIX: &str = "automerge:";
+    if !url.starts_with(PREFIX) {
+        return None;
+    }
+
+    let hash = &url[PREFIX.len()..];
+    DocumentId::from_str(hash).ok()
+}
+
+
+
+
 
 // C FFI functions for GodotProject
 
@@ -909,18 +1072,24 @@ pub extern "C" fn godot_project_process(godot_project: *mut GodotProject) {
 
 #[no_mangle]
 pub extern "C" fn godot_project_save_file(
-    godot_project: *const GodotProject, path: *const std::os::raw::c_char, content: *const std::os::raw::c_char, _content_len: usize) {
+    godot_project: *const GodotProject, path: *const std::os::raw::c_char, content: *const std::os::raw::c_char, content_len: usize, binary: bool) {
     let godot_project = unsafe { &*godot_project };
     let path = unsafe { std::ffi::CStr::from_ptr(path) }
         .to_str()
         .unwrap()
         .to_string();
     // use content_len
-    let content = unsafe { std::ffi::CStr::from_ptr(content) }
-        .to_str()
-        .unwrap()
-        .to_string();
-    godot_project.save_file(path, content);
+    if binary {
+        let content_u8 = unsafe { std::slice::from_raw_parts(content as *const u8, content_len) };
+        let content = StringOrPackedByteArray::PackedByteArray(content_u8.to_vec());
+        godot_project.save_file(path, content);
+    } else {
+        let content = StringOrPackedByteArray::String(unsafe { std::ffi::CStr::from_ptr(content) }
+            .to_str()
+            .unwrap()
+            .to_string());
+        godot_project.save_file(path, content);
+    }
 }
 
 #[no_mangle]
@@ -973,6 +1142,35 @@ pub extern "C" fn godot_project_get_checked_out_branch_id(godot_project: *const 
     let checked_out_branch_id = godot_project.get_checked_out_branch_id();
     let c_string = std::ffi::CString::new(checked_out_branch_id).unwrap();
     c_string.into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn godot_project_get_file(godot_project: *const GodotProject, path: *const std::os::raw::c_char, r_len: *mut u64, r_is_binary: *mut u8) -> *const std::os::raw::c_char {
+    let godot_project = unsafe { &*godot_project };
+    let path = unsafe { std::ffi::CStr::from_ptr(path) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    let file = godot_project.get_file(path);
+    match file {
+        Some(StringOrPackedByteArray::String(s)) => {
+            unsafe {
+                r_is_binary.write(0);
+                r_len.write(s.len() as u64);
+            };
+            let c_string = std::ffi::CString::new(s).unwrap();
+            c_string.into_raw()
+        },
+        Some(StringOrPackedByteArray::PackedByteArray(bytes)) => {
+            unsafe {
+                r_is_binary.write(1);
+                r_len.write(bytes.len() as u64);
+            };
+            let c_string = std::ffi::CString::new("binary").unwrap();
+            c_string.into_raw()
+        },
+        None => std::ptr::null()
+    }
 }
 
 // takes in a 

@@ -22,7 +22,9 @@ public:
 
 	void stop();
 
-	void save_file(const String &path, const String &content);
+	Error save_file(const String &path, const Variant &content);
+
+	Variant get_file(const String &path);
 
 	String get_fs_doc_id() const;
 

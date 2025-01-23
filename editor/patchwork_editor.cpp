@@ -44,6 +44,13 @@ void PatchworkEditor::_on_history_changed() {
 		auto scene_path = scene->get_scene_file_path();
 		if (scene_path == "res://main.tscn") {
 			fs->save_file(scene->get_scene_file_path(), contents);
+			// test getting the file
+			// auto file_contents = fs->get_file(scene->get_scene_file_path());
+			// if (file_contents != contents) {
+			// 	print_line("File contents do not match");
+			// } else {
+			// 	print_line("Yay");
+			// }
 		}
 		file->close();
 	}
