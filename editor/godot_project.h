@@ -1,7 +1,7 @@
 #pragma once
+#include "../external/include/patchwork_rust/patchwork_rust.h"
 #include "core/string/print_string.h"
 #include "core/variant/variant.h"
-#include "patchwork_rust/patchwork_rust.h"
 #include "scene/main/node.h"
 
 class GodotProject : public Node {
@@ -26,7 +26,7 @@ public:
 
 	Variant get_file(const String &path);
 
-	String get_fs_doc_id() const;
+	String get_doc_id() const;
 
 	TypedArray<Dictionary> get_branches();
 
@@ -37,6 +37,7 @@ public:
 	String get_checked_out_branch_id() const;
 	Vector<String> list_all_files();
 	Vector<String> get_heads();
+	Vector<String> get_changes();
 
 protected:
 	static void _bind_methods();

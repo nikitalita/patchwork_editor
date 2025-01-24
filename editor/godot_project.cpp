@@ -13,7 +13,7 @@ void GodotProject::_signal_callback(void *signal_user_data, const char *signal, 
 
 void GodotProject::signal_callback(const String &signal, const Vector<String> &args) {
 	if (String(signal) == "file_changed") {
-		emit_signal(SNAME("file_changed"));
+		emit_signal(SNAME("files_changed"));
 	} else if (String(signal) == "checked_out_branch") {
 		emit_signal(SNAME("checked_out_branch"), args[0]);
 	} else if (String(signal) == "branches_changed") {
@@ -87,7 +87,7 @@ Variant GodotProject::get_file(const String &path) {
 	return variant;
 }
 
-String GodotProject::get_fs_doc_id() const {
+String GodotProject::get_doc_id() const {
 	auto id = godot_project_get_fs_doc_id(fs);
 	auto strid = String(id);
 	godot_project_free_string(id);
@@ -152,6 +152,18 @@ Vector<String> GodotProject::get_heads() {
 	return heads;
 }
 
+Vector<String> GodotProject::get_changes() {
+	Vector<String> changes;
+	uint64_t len;
+
+	auto change_list = godot_project_get_changes(fs, &len);
+	for (uint64_t i = 0; i < len; i++) {
+		changes.push_back(String::utf8(change_list[i]));
+	}
+	godot_project_free_vec_string(change_list, len);
+	return changes;
+}
+
 void GodotProject::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_PROCESS: {
@@ -163,17 +175,19 @@ void GodotProject::_notification(int p_what) {
 void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("refresh"), &GodotProject::process);
 	ClassDB::bind_method(D_METHOD("stop"), &GodotProject::stop);
-	ClassDB::bind_method(D_METHOD("save", "path", "content"), &GodotProject::save_file);
+	ClassDB::bind_method(D_METHOD("save_file", "path", "content"), &GodotProject::save_file);
 	ClassDB::bind_method(D_METHOD("get_file", "path"), &GodotProject::get_file);
-	ClassDB::bind_method(D_METHOD("get_fs_doc_id"), &GodotProject::get_fs_doc_id);
+	ClassDB::bind_method(D_METHOD("get_doc_id"), &GodotProject::get_doc_id);
 	ClassDB::bind_method(D_METHOD("get_branches"), &GodotProject::get_branches);
 	ClassDB::bind_method(D_METHOD("checkout_branch", "branch_id"), &GodotProject::checkout_branch);
 	ClassDB::bind_method(D_METHOD("create_branch", "name"), &GodotProject::create_branch);
 	ClassDB::bind_method(D_METHOD("get_checked_out_branch_id"), &GodotProject::get_checked_out_branch_id);
 	ClassDB::bind_method(D_METHOD("list_all_files"), &GodotProject::list_all_files);
 	ClassDB::bind_method(D_METHOD("get_heads"), &GodotProject::get_heads);
+	ClassDB::bind_method(D_METHOD("get_changes"), &GodotProject::get_changes);
+	ClassDB::bind_method(D_METHOD("process"), &GodotProject::process);
 	ClassDB::bind_static_method(get_class_static(), SNAME("create"), &GodotProject::create);
-	ADD_SIGNAL(MethodInfo("file_changed"));
+	ADD_SIGNAL(MethodInfo("files_changed"));
 	ADD_SIGNAL(MethodInfo("branches_changed"));
 	ADD_SIGNAL(MethodInfo("checked_out_branch", PropertyInfo(Variant::STRING, "branch_id")));
 	// ADD_SIGNAL(MethodInfo("started"));

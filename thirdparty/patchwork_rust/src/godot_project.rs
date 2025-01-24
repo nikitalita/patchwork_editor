@@ -6,6 +6,7 @@ use std::{
         Arc, Mutex,
     },
 };
+use ::safer_ffi::prelude::*;
 
 use automerge::{transaction::Transactable, Automerge, ChangeHash, ObjType, ReadDoc, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
@@ -1050,9 +1051,9 @@ pub extern "C" fn godot_project_free_vec_string(s: *const *const std::os::raw::c
         if s.is_null() {
             return;
         }
-        let slice = std::slice::from_raw_parts(s as *const *const std::os::raw::c_char, len as usize);
-        for i in 0..len {
-            drop(std::ffi::CString::from_raw(slice[i as usize] as *mut c_char));
+        let c_strs = std::slice::from_raw_parts(s, len as usize);
+        for c_str in c_strs {
+            drop(std::ffi::CString::from_raw(*c_str as *mut c_char));
         }
     }
 }
@@ -1115,16 +1116,18 @@ pub extern "C" fn godot_project_destroy(godot_project: *mut GodotProject_rs) {
 
 // takes a pointer to an int for the length and returns a *const std::os::raw::c_char for the array of strings
 #[no_mangle]
-pub extern "C" fn godot_project_get_branches(godot_project: *mut GodotProject_rs, _len: *mut u64) -> *const *const c_char {
+pub extern "C" fn godot_project_get_branches(godot_project: *mut GodotProject_rs, _len: *mut u64) -> *const *const c_char
+{
     let godot_project = unsafe { &mut *godot_project };
     let branches = godot_project.get_branches();
 
     let c_strs = strings_to_c_strs(&branches);
-    let char_stars = to_char_stars(&c_strs);
+    let char_stars = to_char_stars(&c_strs).clone();
     //char_stars.into_raw_parts()
     // ignore unstable
     unsafe { *_len = (char_stars.len() / 4) as u64 };
     let ptr = char_stars.as_ptr();
+    std::mem::forget(c_strs);
     std::mem::forget(char_stars);
     ptr
 }
@@ -1201,6 +1204,7 @@ pub extern "C" fn godot_project_list_all_files(godot_project: *const GodotProjec
     unsafe { *_len = len };
 
     let ptr = char_stars.as_ptr();
+    std::mem::forget(c_strs);
     std::mem::forget(char_stars);
     ptr
 }
@@ -1217,6 +1221,23 @@ pub extern "C" fn godot_project_get_heads(godot_project: *const GodotProject_rs,
     unsafe { *_len = len };
 
     let ptr = char_stars.as_ptr();
+    std::mem::forget(c_strs);
+    std::mem::forget(char_stars);
+    ptr
+}
+//get_changes
+#[no_mangle]
+pub extern "C" fn godot_project_get_changes(godot_project: *const GodotProject_rs, _len: *mut u64) -> *const *const c_char {
+    let godot_project = unsafe { &*godot_project };
+    let changes = godot_project.get_changes();
+
+    let c_strs = strings_to_c_strs(&changes);
+    let char_stars = to_char_stars(&c_strs);
+    let len = (char_stars.len()) as u64;
+    unsafe { *_len = len };
+
+    let ptr = char_stars.as_ptr();
+    std::mem::forget(c_strs);
     std::mem::forget(char_stars);
     ptr
 }
