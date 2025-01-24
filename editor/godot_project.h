@@ -28,6 +28,8 @@ public:
 
 	String get_doc_id() const;
 
+	String get_branch_doc_id() const;
+
 	TypedArray<Dictionary> get_branches();
 
 	void checkout_branch(const String &branch_id);

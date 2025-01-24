@@ -12,10 +12,10 @@ void GodotProject::_signal_callback(void *signal_user_data, const char *signal, 
 }
 
 void GodotProject::signal_callback(const String &signal, const Vector<String> &args) {
-	if (String(signal) == "file_changed") {
+	if (String(signal) == "files_changed") {
 		emit_signal(SNAME("files_changed"));
 	} else if (String(signal) == "checked_out_branch") {
-		emit_signal(SNAME("checked_out_branch"), args[0]);
+		emit_signal(SNAME("checked_out_branch")/*, args[0]*/);
 	} else if (String(signal) == "branches_changed") {
 		emit_signal(SNAME("branches_changed"));
 	} else {
@@ -34,9 +34,9 @@ GodotProject::GodotProject() :
 }
 
 void GodotProject::init(const String &p_maybe_fs_doc_id) {
-	ERR_FAIL_COND_MSG(fs != nullptr, "AutomergeFS already created");
+	ERR_FAIL_COND_MSG(fs != nullptr, "godot project already created");
 	fs = godot_project_create(p_maybe_fs_doc_id.utf8().get_data(), this, &_signal_callback);
-	print_line("AutomergeFS created: " + String::num_int64((int64_t)fs));
+	print_line("godot project created: " + String::num_int64((int64_t)fs));
 }
 
 GodotProject::~GodotProject() {
@@ -90,6 +90,13 @@ Variant GodotProject::get_file(const String &path) {
 String GodotProject::get_doc_id() const {
 	auto id = godot_project_get_fs_doc_id(fs);
 	auto strid = String(id);
+	godot_project_free_string(id);
+	return strid;
+}
+
+String GodotProject::get_branch_doc_id() const {
+	auto id = godot_project_get_branch_doc_id(fs);
+	auto strid = String::utf8(id);
 	godot_project_free_string(id);
 	return strid;
 }
@@ -186,9 +193,10 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_heads"), &GodotProject::get_heads);
 	ClassDB::bind_method(D_METHOD("get_changes"), &GodotProject::get_changes);
 	ClassDB::bind_method(D_METHOD("process"), &GodotProject::process);
+	ClassDB::bind_method(D_METHOD("get_branch_doc_id"), &GodotProject::get_branch_doc_id);
 	ClassDB::bind_static_method(get_class_static(), SNAME("create"), &GodotProject::create);
 	ADD_SIGNAL(MethodInfo("files_changed"));
 	ADD_SIGNAL(MethodInfo("branches_changed"));
-	ADD_SIGNAL(MethodInfo("checked_out_branch", PropertyInfo(Variant::STRING, "branch_id")));
+	ADD_SIGNAL(MethodInfo("checked_out_branch" /*,PropertyInfo(Variant::STRING, "branch_id")*/));
 	// ADD_SIGNAL(MethodInfo("started"));
 }

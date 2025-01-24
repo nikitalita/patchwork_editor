@@ -680,7 +680,9 @@ impl GodotProject_rs {
         let slc = &[branch_id.as_str()];
         let arg_cstrs = to_c_strs(slc);
         let args = to_char_stars(&arg_cstrs);
-        (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), args.as_ptr(), args.len());
+
+        // @paul: passing args causes error so I'm not passing the checked out branch
+        (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), std::ptr::null(), 0);
 
     }
 
@@ -1025,6 +1027,15 @@ fn parse_automerge_url(url: &str) -> Option<DocumentId> {
 
 
 // C FFI functions for GodotProject
+
+#[no_mangle]
+pub extern "C" fn godot_project_get_branch_doc_id(godot_project: *const GodotProject_rs) -> *const std::os::raw::c_char {
+    let godot_project = unsafe { &*godot_project };
+    let branch_doc_id = godot_project.get_checked_out_branch_id();
+    let c_string = std::ffi::CString::new(branch_doc_id).unwrap();
+    c_string.into_raw()
+}
+
 
 #[no_mangle]
 pub extern "C" fn godot_project_get_fs_doc_id(godot_project: *const GodotProject_rs) -> *const std::os::raw::c_char { 
