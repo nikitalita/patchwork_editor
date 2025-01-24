@@ -128,6 +128,10 @@ String GodotProject::create_branch(const String &name) {
 	return str;
 }
 
+void GodotProject::merge_branch(const String &branch_id) {
+	godot_project_merge_branch(fs, branch_id.utf8().get_data());
+}
+
 String GodotProject::get_checked_out_branch_id() const {
 	auto rust_str = godot_project_get_checked_out_branch_id(fs);
 	auto str = String::utf8(rust_str);
@@ -187,6 +191,7 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_doc_id"), &GodotProject::get_doc_id);
 	ClassDB::bind_method(D_METHOD("get_branches"), &GodotProject::get_branches);
 	ClassDB::bind_method(D_METHOD("checkout_branch", "branch_id"), &GodotProject::checkout_branch);
+	ClassDB::bind_method(D_METHOD("merge_branch", "branch_id"), &GodotProject::merge_branch);
 	ClassDB::bind_method(D_METHOD("create_branch", "name"), &GodotProject::create_branch);
 	ClassDB::bind_method(D_METHOD("get_checked_out_branch_id"), &GodotProject::get_checked_out_branch_id);
 	ClassDB::bind_method(D_METHOD("list_all_files"), &GodotProject::list_all_files);

@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::{Arc, Mutex}};
 
+use automerge::transaction::Transaction;
 use automerge_repo::{DocHandle, DocumentId};
 
 
@@ -27,7 +28,7 @@ impl DocHandleMap {
         self.handles.lock().unwrap().values().cloned().collect()
     }
 
-    pub(crate) fn get_doc(&self, doc_id: &DocumentId) -> Option<DocHandle> {
+    pub(crate) fn get_handle(&self, doc_id: &DocumentId) -> Option<DocHandle> {
         self.handles.lock().unwrap().get(doc_id).cloned()
     }
 }

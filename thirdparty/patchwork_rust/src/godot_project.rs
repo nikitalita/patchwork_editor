@@ -49,6 +49,7 @@ struct BranchesMetadataDoc {
 struct Branch {
     name: String,
     id: String,
+    is_merged: bool
 }
 
 #[derive(Clone)]
@@ -624,6 +625,40 @@ impl GodotProject_rs {
         }
     }
 
+    fn merge_branch(&self, branch_id: String) {
+        let branches_metadata_doc = self
+            .doc_state_map
+            .get_doc(&self.branches_metadata_doc_id)
+            .unwrap();
+
+      
+        // merge branch into main
+
+        let branch_doc = self.doc_handle_map.get_handle(&DocumentId::from_str(&branch_id).unwrap()).unwrap();
+
+        let main_doc_id = DocumentId::from_str(&branches_metadata_doc.get_string(ROOT, "main_doc_id").unwrap()).unwrap();
+
+        branch_doc.with_doc_mut(|branch_doc| {
+            self.update_doc(main_doc_id, |d| {
+                d.merge(branch_doc);
+            });
+        });
+        
+        // mark branch as merged
+
+        let mut branches_metadata: BranchesMetadataDoc = hydrate(&branches_metadata_doc)
+        .unwrap_or_else(|e| panic!("Failed to hydrate branches metadata doc: {}", e));
+
+        let branch = branches_metadata.branches.get_mut(&branch_id).unwrap();
+        branch.is_merged = true;
+
+        self.update_doc(self.branches_metadata_doc_id.clone(), |d| {
+            let mut tx = d.transaction();
+            reconcile(&mut tx, branches_metadata).unwrap();
+            tx.commit();
+        });
+    }
+
     // #[func]
     fn create_branch(&self, name: String) -> String {
         let branches_metadata_doc = self
@@ -640,6 +675,7 @@ impl GodotProject_rs {
         branches_metadata.branches.insert(
             new_doc_id.to_string(),
             Branch {
+                is_merged: false,
                 name,
                 id: new_doc_id.to_string(),
             },
@@ -792,7 +828,7 @@ impl GodotProject_rs {
                         // check if it has new branches so we can load them
                         for (branch_doc_id, _) in branches_metadata.branches {
                             let branch_doc_id = DocumentId::from_str(&branch_doc_id).unwrap();
-                            if self.doc_handle_map.get_doc(&branch_doc_id).is_none() {
+                            if self.doc_handle_map.get_handle(&branch_doc_id).is_none() {
                                 self.request_doc(branch_doc_id);                            
                             }
                         }
@@ -882,7 +918,7 @@ impl GodotProject_rs {
 
                         // update stored state of doc
                         let SyncEvent::DocChanged { doc_id } = sync_event.clone();
-                        let doc_handle = doc_handle_map.get_doc(&doc_id.clone()).unwrap();
+                        let doc_handle = doc_handle_map.get_handle(&doc_id.clone()).unwrap();
                         let doc = doc_handle.with_doc(|d| d.clone());
                         doc_state_map.add_doc(doc_id.clone(), doc);
 
@@ -919,7 +955,7 @@ impl GodotProject_rs {
     where
         F: FnOnce(&mut Automerge),
     {
-        if let Some(doc_handle) = self.doc_handle_map.get_doc(&doc_id) {
+        if let Some(doc_handle) = self.doc_handle_map.get_handle(&doc_id) {
             doc_handle.with_doc_mut(f);
             let new_doc = doc_handle.with_doc(|d| d.clone());
             self.doc_state_map.add_doc(doc_id, new_doc);
@@ -986,7 +1022,7 @@ impl GodotProject_rs {
     }
 
     fn get_doc_handle(&self, id: DocumentId) -> Option<DocHandle> {
-        self.doc_handle_map.get_doc(&id.into())
+        self.doc_handle_map.get_handle(&id.into())
     }
 
     fn get_checked_out_doc_id(&self) -> DocumentId {
@@ -1165,6 +1201,19 @@ pub extern "C" fn godot_project_create_branch(godot_project: *mut GodotProject_r
     let c_string = std::ffi::CString::new(branch_id).unwrap();
     c_string.into_raw()
 }
+
+// merge_branch
+#[no_mangle]
+pub extern "C" fn godot_project_merge_branch(godot_project: *mut GodotProject_rs, branch_id: *const std::os::raw::c_char) {
+    let godot_project = unsafe { &mut *godot_project };
+    let branch_id = unsafe { std::ffi::CStr::from_ptr(branch_id) }
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    godot_project.merge_branch(branch_id);
+}
+
 
 #[no_mangle]
 pub extern "C" fn godot_project_get_checked_out_branch_id(godot_project: *const GodotProject_rs) -> *const std::os::raw::c_char {
