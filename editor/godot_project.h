@@ -4,19 +4,19 @@
 #include "patchwork_rust/patchwork_rust.h"
 #include "scene/main/node.h"
 
-class GodotProjectWrapper : public Node {
-	GDCLASS(GodotProjectWrapper, Node);
+class GodotProject : public Node {
+	GDCLASS(GodotProject, Node);
 
-	static void _signal_callback(void *signal_user_data, const char *signal, const char* const * args, size_t args_len);
-	void signal_callback(const String &signal, Dictionary args);
+	static void _signal_callback(void *signal_user_data, const char *signal, const char *const *args, size_t p_args_len);
+	void signal_callback(const String &signal, const Vector<String> &args);
 
 public:
-	static GodotProjectWrapper *instance_and_create(const String &maybe_fs_doc_id);
+	static GodotProject *create(const String &maybe_fs_doc_id);
 	// Don't use this, uses instance_and_create instead
-	GodotProjectWrapper();
-	~GodotProjectWrapper();
+	GodotProject();
+	~GodotProject();
 
-	void create(const String &maybe_fs_doc_id);
+	void init(const String &maybe_fs_doc_id);
 
 	void process();
 
@@ -35,11 +35,13 @@ public:
 	String create_branch(const String &name);
 
 	String get_checked_out_branch_id() const;
+	Vector<String> list_all_files();
+	Vector<String> get_heads();
 
 protected:
 	static void _bind_methods();
 	void _notification(int p_what);
 
 private:
-	GodotProject *fs;
+	GodotProject_rs *fs;
 };

@@ -1,71 +1,73 @@
 #include "godot_project.h"
+#include "core/object/object.h"
 
-void GodotProjectWrapper::_signal_callback(void *signal_user_data, const char *signal, const char *const *args, size_t args_len) {
-	Dictionary dictionary;
-	ERR_FAIL_COND_MSG(args_len % 2 != 0, "Expected an even number of arguments");
-	for (size_t i = 0; i < args_len; i += 2) {
-		dictionary[String::utf8(args[i])] = String::utf8(args[i + 1]);
+void GodotProject::_signal_callback(void *signal_user_data, const char *signal, const char *const *p_args, size_t p_args_len) {
+	Vector<String> args;
+	ERR_FAIL_COND_MSG(p_args_len % 2 != 0, "Expected an even number of arguments");
+	for (size_t i = 0; i < p_args_len; i++) {
+		args.push_back(p_args[i]);
 	}
-	auto self = static_cast<GodotProjectWrapper *>(signal_user_data);
-	self->signal_callback(signal, dictionary);
+	auto self = static_cast<GodotProject *>(signal_user_data);
+	self->signal_callback(signal, args);
 }
 
-void GodotProjectWrapper::signal_callback(const String &signal, Dictionary args) {
+void GodotProject::signal_callback(const String &signal, const Vector<String> &args) {
 	if (String(signal) == "file_changed") {
-		emit_signal(SNAME("file_changed"), args);
-	} else if (String(signal) == "started") {
-		emit_signal(SNAME("started"));
+		emit_signal(SNAME("file_changed"));
+	} else if (String(signal) == "checked_out_branch") {
+		emit_signal(SNAME("checked_out_branch"), args[0]);
+	} else if (String(signal) == "branches_changed") {
+		emit_signal(SNAME("branches_changed"));
 	} else {
 		ERR_FAIL_MSG("Unknown signal: " + String(signal));
 	}
 }
 
-GodotProjectWrapper *GodotProjectWrapper::instance_and_create(const String &maybe_fs_doc_id) {
-	GodotProjectWrapper *self{ memnew(GodotProjectWrapper) };
-	self->create(maybe_fs_doc_id);
+GodotProject *GodotProject::create(const String &maybe_fs_doc_id) {
+	GodotProject *self{ memnew(GodotProject) };
+	self->init(maybe_fs_doc_id);
 	return self;
 }
 
-GodotProjectWrapper::GodotProjectWrapper() :
+GodotProject::GodotProject() :
 		fs(nullptr) {
 }
 
-void GodotProjectWrapper::create(const String &p_maybe_fs_doc_id) {
+void GodotProject::init(const String &p_maybe_fs_doc_id) {
 	ERR_FAIL_COND_MSG(fs != nullptr, "AutomergeFS already created");
 	fs = godot_project_create(p_maybe_fs_doc_id.utf8().get_data(), this, &_signal_callback);
 	print_line("AutomergeFS created: " + String::num_int64((int64_t)fs));
 }
 
-GodotProjectWrapper::~GodotProjectWrapper() {
+GodotProject::~GodotProject() {
 	if (fs != nullptr) {
 		godot_project_stop(fs);
 		godot_project_destroy(fs);
 	}
 }
 
-void GodotProjectWrapper::process() {
+void GodotProject::process() {
 	godot_project_process(fs);
 }
 
-void GodotProjectWrapper::stop() {
+void GodotProject::stop() {
 	godot_project_stop(fs);
 }
 
-Error GodotProjectWrapper::save_file(const String &path, const Variant &content) {
+Error GodotProject::save_file(const String &path, const Variant &content) {
 	// TODO: make godot_project_save_file return an error code
 	if (content.get_type() == Variant::STRING) {
-		String content_str = content;
-		godot_project_save_file(fs, path.utf8().get_data(), content_str.utf8().get_data(), content_str.utf8().size(), false);
+		auto content_str = content.operator String().utf8();
+		godot_project_save_file(fs, path.utf8().get_data(), content_str.get_data(), content_str.size(), false);
 	} else if (content.get_type() == Variant::PACKED_BYTE_ARRAY) {
-		PackedByteArray raw_array = content;
-		auto raw_array_ptr = raw_array.ptr();
-		godot_project_save_file(fs, path.utf8().get_data(), (const char *)raw_array_ptr, raw_array.size(), true);
+		godot_project_save_file(fs, path.utf8().get_data(), (const char *)content.operator PackedByteArray().ptr(), content.operator PackedByteArray().size(), true);
 	} else {
 		ERR_FAIL_V_MSG(ERR_INVALID_PARAMETER, "Unsupported content type: " + String::num_int64(content.get_type()));
 	}
 	return OK;
 }
-Variant GodotProjectWrapper::get_file(const String &path) {
+
+Variant GodotProject::get_file(const String &path) {
 	uint8_t is_binary;
 	uint64_t length;
 	Variant variant;
@@ -85,14 +87,14 @@ Variant GodotProjectWrapper::get_file(const String &path) {
 	return variant;
 }
 
-String GodotProjectWrapper::get_fs_doc_id() const {
+String GodotProject::get_fs_doc_id() const {
 	auto id = godot_project_get_fs_doc_id(fs);
 	auto strid = String(id);
 	godot_project_free_string(id);
 	return strid;
 }
 
-TypedArray<Dictionary> GodotProjectWrapper::get_branches() {
+TypedArray<Dictionary> GodotProject::get_branches() {
 	TypedArray<Dictionary> branches;
 	uint64_t len;
 	auto branch_ids = godot_project_get_branches(fs, &len);
@@ -102,22 +104,55 @@ TypedArray<Dictionary> GodotProjectWrapper::get_branches() {
 		branch[String::utf8(branch_ids[i + 2])] = String::utf8(branch_ids[i + 3]);
 		branches.push_back(branch);
 	}
+	godot_project_free_vec_string(branch_ids, len * 4);
+
 	return branches;
 }
 
-void GodotProjectWrapper::checkout_branch(const String &branch_id) {
+void GodotProject::checkout_branch(const String &branch_id) {
 	godot_project_checkout_branch(fs, branch_id.utf8().get_data());
 }
 
-String GodotProjectWrapper::create_branch(const String &name) {
-	return String::utf8(godot_project_create_branch(fs, name.utf8().get_data()));
+String GodotProject::create_branch(const String &name) {
+	// return String::utf8(godot_project_create_branch(fs, name.utf8().get_data()));
+	auto rust_str = godot_project_create_branch(fs, name.utf8().get_data());
+	auto str = String::utf8(rust_str);
+	godot_project_free_string(rust_str);
+	return str;
 }
 
-String GodotProjectWrapper::get_checked_out_branch_id() const {
-	return String::utf8(godot_project_get_checked_out_branch_id(fs));
+String GodotProject::get_checked_out_branch_id() const {
+	auto rust_str = godot_project_get_checked_out_branch_id(fs);
+	auto str = String::utf8(rust_str);
+	godot_project_free_string(rust_str);
+	return str;
 }
 
-void GodotProjectWrapper::_notification(int p_what) {
+//godot_project_list_all_files
+Vector<String> GodotProject::list_all_files() {
+	Vector<String> files;
+	uint64_t len;
+	auto branch_files = godot_project_list_all_files(fs, &len);
+	for (uint64_t i = 0; i < len; i++) {
+		files.push_back(String::utf8(branch_files[i]));
+	}
+	godot_project_free_vec_string(branch_files, len);
+	return files;
+}
+
+//godot_project_get_heads
+Vector<String> GodotProject::get_heads() {
+	Vector<String> heads;
+	uint64_t len;
+	auto branch_heads = godot_project_get_heads(fs, &len);
+	for (uint64_t i = 0; i < len; i++) {
+		heads.push_back(String::utf8(branch_heads[i]));
+	}
+	godot_project_free_vec_string(branch_heads, len);
+	return heads;
+}
+
+void GodotProject::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_PROCESS: {
 			process();
@@ -125,10 +160,21 @@ void GodotProjectWrapper::_notification(int p_what) {
 	}
 }
 
-void GodotProjectWrapper::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("refresh"), &GodotProjectWrapper::process);
-	ClassDB::bind_method(D_METHOD("stop"), &GodotProjectWrapper::stop);
-	ClassDB::bind_method(D_METHOD("save", "path", "content"), &GodotProjectWrapper::save_file);
-	ADD_SIGNAL(MethodInfo("file_changed", PropertyInfo(Variant::DICTIONARY, "file")));
-	ADD_SIGNAL(MethodInfo("started"));
+void GodotProject::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("refresh"), &GodotProject::process);
+	ClassDB::bind_method(D_METHOD("stop"), &GodotProject::stop);
+	ClassDB::bind_method(D_METHOD("save", "path", "content"), &GodotProject::save_file);
+	ClassDB::bind_method(D_METHOD("get_file", "path"), &GodotProject::get_file);
+	ClassDB::bind_method(D_METHOD("get_fs_doc_id"), &GodotProject::get_fs_doc_id);
+	ClassDB::bind_method(D_METHOD("get_branches"), &GodotProject::get_branches);
+	ClassDB::bind_method(D_METHOD("checkout_branch", "branch_id"), &GodotProject::checkout_branch);
+	ClassDB::bind_method(D_METHOD("create_branch", "name"), &GodotProject::create_branch);
+	ClassDB::bind_method(D_METHOD("get_checked_out_branch_id"), &GodotProject::get_checked_out_branch_id);
+	ClassDB::bind_method(D_METHOD("list_all_files"), &GodotProject::list_all_files);
+	ClassDB::bind_method(D_METHOD("get_heads"), &GodotProject::get_heads);
+	ClassDB::bind_static_method(get_class_static(), SNAME("create"), &GodotProject::create);
+	ADD_SIGNAL(MethodInfo("file_changed"));
+	ADD_SIGNAL(MethodInfo("branches_changed"));
+	ADD_SIGNAL(MethodInfo("checked_out_branch", PropertyInfo(Variant::STRING, "branch_id")));
+	// ADD_SIGNAL(MethodInfo("started"));
 }

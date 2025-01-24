@@ -64,7 +64,7 @@ pub enum StringOrPackedByteArray {
 
 // #[derive(GodotClass)]
 // #[class(no_init, base=Node)]
-pub struct GodotProject {
+pub struct GodotProject_rs {
     // base: Base<Node>,
     runtime: Runtime,
     repo_handle: RepoHandle,
@@ -108,7 +108,7 @@ fn to_char_stars(c_strs: &[std::ffi::CString]) -> Vec<*const std::os::raw::c_cha
 }
 
 // #[godot_api]
-impl GodotProject {
+impl GodotProject_rs {
     // #[signal]
     // fn checked_out_branch(branch_id: String);
 
@@ -121,7 +121,7 @@ impl GodotProject {
     // #[func]
     // hack: pass in empty string to create a new doc
     // godot rust doens't seem to support Option args
-    fn create(maybe_branches_metadata_doc_id: String, signal_user_data: *mut c_void, signal_callback: AutoMergeSignalCallback) -> GodotProject /*-> Gd<Self>*/ {
+    fn create(maybe_branches_metadata_doc_id: String, signal_user_data: *mut c_void, signal_callback: AutoMergeSignalCallback) -> GodotProject_rs /*-> Gd<Self>*/ {
         let runtime: Runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -279,7 +279,7 @@ impl GodotProject {
             sync_event_sender.clone(),
         );
 
-        /*return Gd::from_init_fn(|base| Self */ GodotProject{
+        /*return Gd::from_init_fn(|base| Self */ GodotProject_rs {
             // base,
             runtime,
             repo_handle,
@@ -1026,7 +1026,7 @@ fn parse_automerge_url(url: &str) -> Option<DocumentId> {
 // C FFI functions for GodotProject
 
 #[no_mangle]
-pub extern "C" fn godot_project_get_fs_doc_id(godot_project: *const GodotProject) -> *const std::os::raw::c_char { 
+pub extern "C" fn godot_project_get_fs_doc_id(godot_project: *const GodotProject_rs) -> *const std::os::raw::c_char { 
     let godot_project = unsafe { &*godot_project };
     let fs_doc_id = godot_project.get_doc_id();
     let c_string = std::ffi::CString::new(fs_doc_id).unwrap();
@@ -1045,34 +1045,48 @@ pub extern "C" fn godot_project_free_string(s: *const std::os::raw::c_char) {
 }
 
 #[no_mangle]
+pub extern "C" fn godot_project_free_vec_string(s: *const *const std::os::raw::c_char, len: u64) {
+    unsafe {
+        if s.is_null() {
+            return;
+        }
+        let slice = std::slice::from_raw_parts(s as *const *const std::os::raw::c_char, len as usize);
+        for i in 0..len {
+            drop(std::ffi::CString::from_raw(slice[i as usize] as *mut c_char));
+        }
+    }
+}
+
+
+#[no_mangle]
 pub extern "C" fn godot_project_create(
     maybe_fs_doc_id: *const std::os::raw::c_char,
     signal_user_data: *mut c_void,
     signal_callback: AutoMergeSignalCallback,
-) -> *mut GodotProject {
+) -> *mut GodotProject_rs {
     let maybe_fs_doc_id = unsafe { std::ffi::CStr::from_ptr(maybe_fs_doc_id) }
         .to_str()
         .unwrap()
         .to_string();
-    let godot_project = GodotProject::create(maybe_fs_doc_id, signal_user_data, signal_callback);
+    let godot_project = GodotProject_rs::create(maybe_fs_doc_id, signal_user_data, signal_callback);
     Box::into_raw(Box::new(godot_project))
 }
 
 #[no_mangle]
-pub extern "C" fn godot_project_stop(godot_project: *mut GodotProject) {
+pub extern "C" fn godot_project_stop(godot_project: *mut GodotProject_rs) {
     let godot_project = unsafe { &mut *godot_project };
     godot_project.stop();
 }
 
 #[no_mangle]
-pub extern "C" fn godot_project_process(godot_project: *mut GodotProject) {
+pub extern "C" fn godot_project_process(godot_project: *mut GodotProject_rs) {
     let godot_project = unsafe { &mut *godot_project };
     godot_project.process();
 }
 
 #[no_mangle]
 pub extern "C" fn godot_project_save_file(
-    godot_project: *const GodotProject, path: *const std::os::raw::c_char, content: *const std::os::raw::c_char, content_len: usize, binary: bool) {
+    godot_project: *const GodotProject_rs, path: *const std::os::raw::c_char, content: *const std::os::raw::c_char, content_len: usize, binary: bool) {
     let godot_project = unsafe { &*godot_project };
     let path = unsafe { std::ffi::CStr::from_ptr(path) }
         .to_str()
@@ -1093,7 +1107,7 @@ pub extern "C" fn godot_project_save_file(
 }
 
 #[no_mangle]
-pub extern "C" fn godot_project_destroy(godot_project: *mut GodotProject) {
+pub extern "C" fn godot_project_destroy(godot_project: *mut GodotProject_rs) {
     unsafe {
         drop(Box::from_raw(godot_project));
     }
@@ -1101,20 +1115,22 @@ pub extern "C" fn godot_project_destroy(godot_project: *mut GodotProject) {
 
 // takes a pointer to an int for the length and returns a *const std::os::raw::c_char for the array of strings
 #[no_mangle]
-pub extern "C" fn godot_project_get_branches(godot_project: *mut GodotProject, _len: *mut u64) -> *const *const c_char {
+pub extern "C" fn godot_project_get_branches(godot_project: *mut GodotProject_rs, _len: *mut u64) -> *const *const c_char {
     let godot_project = unsafe { &mut *godot_project };
     let branches = godot_project.get_branches();
 
     let c_strs = strings_to_c_strs(&branches);
     let char_stars = to_char_stars(&c_strs);
-    let len = (char_stars.len() / 4) as u64;
-    unsafe { *_len = len };
-    
-    char_stars.as_ptr()
+    //char_stars.into_raw_parts()
+    // ignore unstable
+    unsafe { *_len = (char_stars.len() / 4) as u64 };
+    let ptr = char_stars.as_ptr();
+    std::mem::forget(char_stars);
+    ptr
 }
 
 #[no_mangle]
-pub extern "C" fn godot_project_checkout_branch(godot_project: *mut GodotProject, branch_id: *const std::os::raw::c_char) {
+pub extern "C" fn godot_project_checkout_branch(godot_project: *mut GodotProject_rs, branch_id: *const std::os::raw::c_char) {
     let godot_project = unsafe { &mut *godot_project };
     let branch_id = unsafe { std::ffi::CStr::from_ptr(branch_id) }
         .to_str()
@@ -1125,7 +1141,7 @@ pub extern "C" fn godot_project_checkout_branch(godot_project: *mut GodotProject
 
 // create_branch
 #[no_mangle]
-pub extern "C" fn godot_project_create_branch(godot_project: *mut GodotProject, name: *const std::os::raw::c_char) -> *const std::os::raw::c_char {
+pub extern "C" fn godot_project_create_branch(godot_project: *mut GodotProject_rs, name: *const std::os::raw::c_char) -> *const std::os::raw::c_char {
     let godot_project = unsafe { &mut *godot_project };
     let name = unsafe { std::ffi::CStr::from_ptr(name) }
         .to_str()
@@ -1137,7 +1153,7 @@ pub extern "C" fn godot_project_create_branch(godot_project: *mut GodotProject, 
 }
 
 #[no_mangle]
-pub extern "C" fn godot_project_get_checked_out_branch_id(godot_project: *const GodotProject) -> *const std::os::raw::c_char {
+pub extern "C" fn godot_project_get_checked_out_branch_id(godot_project: *const GodotProject_rs) -> *const std::os::raw::c_char {
     let godot_project = unsafe { &*godot_project };
     let checked_out_branch_id = godot_project.get_checked_out_branch_id();
     let c_string = std::ffi::CString::new(checked_out_branch_id).unwrap();
@@ -1145,7 +1161,7 @@ pub extern "C" fn godot_project_get_checked_out_branch_id(godot_project: *const 
 }
 
 #[no_mangle]
-pub extern "C" fn godot_project_get_file(godot_project: *const GodotProject, path: *const std::os::raw::c_char, r_len: *mut u64, r_is_binary: *mut u8) -> *const std::os::raw::c_char {
+pub extern "C" fn godot_project_get_file(godot_project: *const GodotProject_rs, path: *const std::os::raw::c_char, r_len: *mut u64, r_is_binary: *mut u8) -> *const std::os::raw::c_char {
     let godot_project = unsafe { &*godot_project };
     let path = unsafe { std::ffi::CStr::from_ptr(path) }
         .to_str()
@@ -1171,6 +1187,38 @@ pub extern "C" fn godot_project_get_file(godot_project: *const GodotProject, pat
         },
         None => std::ptr::null()
     }
+}
+
+//list_all_files
+#[no_mangle]
+pub extern "C" fn godot_project_list_all_files(godot_project: *const GodotProject_rs, _len: *mut u64) -> *const *const c_char {
+    let godot_project = unsafe { &*godot_project };
+    let files = godot_project.list_all_files();
+
+    let c_strs = strings_to_c_strs(&files);
+    let char_stars = to_char_stars(&c_strs);
+    let len = (char_stars.len()) as u64;
+    unsafe { *_len = len };
+
+    let ptr = char_stars.as_ptr();
+    std::mem::forget(char_stars);
+    ptr
+}
+
+//get_heads
+#[no_mangle]
+pub extern "C" fn godot_project_get_heads(godot_project: *const GodotProject_rs, _len: *mut u64) -> *const *const c_char {
+    let godot_project = unsafe { &*godot_project };
+    let heads = godot_project.get_heads();
+
+    let c_strs = strings_to_c_strs(&heads);
+    let char_stars = to_char_stars(&c_strs);
+    let len = (char_stars.len()) as u64;
+    unsafe { *_len = len };
+
+    let ptr = char_stars.as_ptr();
+    std::mem::forget(char_stars);
+    ptr
 }
 
 // takes in a 

@@ -82,14 +82,14 @@ void PatchworkEditor::_notification(int p_what) {
 		}
 	}
 }
-
+//godot_project_get_heads
 #define PW_PROJECT_URL "3M3FmnUWqNuQEath9n6DXEYdNaTm"
 
 PatchworkEditor::PatchworkEditor(EditorNode *p_editor) {
 	editor = p_editor;
 	EditorUndoRedoManager::get_singleton()->connect(SNAME("history_changed"), callable_mp(this, &PatchworkEditor::_on_history_changed));
 
-	fs = GodotProjectWrapper::instance_and_create("");
+	fs = GodotProject::create("");
 	this->add_child(fs);
 	// EditorFileSystem::get_singleton()->connect("filesystem_changed", callable_mp(this, &PatchworkEditor::signal_callback));
 }

@@ -14,11 +14,11 @@ void patchwork_editor_init_callback() {
 
 void initialize_patchwork_editor_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
-		EditorNode::add_init_callback(&patchwork_editor_init_callback);
+		// EditorNode::add_init_callback(&patchwork_editor_init_callback);
 	}
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		ClassDB::register_class<PatchworkEditor>();
-		ClassDB::register_class<GodotProjectWrapper>();
+		ClassDB::register_class<GodotProject>();
 	}
 }
 
