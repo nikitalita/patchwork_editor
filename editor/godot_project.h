@@ -36,6 +36,8 @@ public:
 
 	String create_branch(const String &name);
 
+	void merge_branch(const String &branch_id);
+
 	String get_checked_out_branch_id() const;
 	Vector<String> list_all_files();
 	Vector<String> get_heads();
