@@ -82,7 +82,7 @@ Variant GodotProject::get_file(const String &path) {
 	} else {
 		auto str = String::utf8(buf_ptr, length);
 		variant = str;
-	}
+	}	
 	godot_project_free_string(buf_ptr);
 	return variant;
 }
@@ -186,24 +186,33 @@ void GodotProject::_notification(int p_what) {
 // State sync functions 
 
 int64_t GodotProject::get_state_int(const String &entity_id, const String &prop) {
-    const char *entity_id_cstr = entity_id.utf8().get_data();
-    const char *prop_cstr = prop.utf8().get_data();
+CharString entity_id_utf8 = entity_id.utf8();
+    CharString prop_utf8 = prop.utf8();
+    
+    const char *entity_id_cstr = entity_id_utf8.get_data();
+    const char *prop_cstr = prop_utf8.get_data();
+
     const int64_t *value = godot_project_get_state_int(fs, entity_id_cstr, prop_cstr);
 
     if (value == nullptr) {
-				print_line("null pointer");
         return 0; // todo: can we return null?
     }
     int64_t result = *value;
-    delete value;
+
+		// todo: do we need to free value?
+
     return result;
 }
 
 void GodotProject::set_state_int(const String &entity_id, const String &prop, int64_t value) {
-    const char *entity_id_cstr = entity_id.utf8().get_data();
-    const char *prop_cstr = prop.utf8().get_data();
+	// Keep the CharString objects alive for the duration of the function
+	CharString entity_id_utf8 = entity_id.utf8();
+	CharString prop_utf8 = prop.utf8();
 
-    godot_project_set_state_int(fs, entity_id_cstr, prop_cstr, value);
+	const char *entity_id_cstr = entity_id_utf8.get_data();
+	const char *prop_cstr = prop_utf8.get_data();
+
+	godot_project_set_state_int(fs, entity_id_cstr, prop_cstr, value);
 }
 
 
