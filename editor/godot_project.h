@@ -43,6 +43,9 @@ public:
 	Vector<String> get_heads();
 	Vector<String> get_changes();
 
+	int64_t get_state_int(const String &entity_id, const String &prop);
+	void set_state_int(const String &entity_id, const String &prop, int64_t value);
+
 protected:
 	static void _bind_methods();
 	void _notification(int p_what);

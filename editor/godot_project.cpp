@@ -183,6 +183,30 @@ void GodotProject::_notification(int p_what) {
 	}
 }
 
+// State sync functions 
+
+int64_t GodotProject::get_state_int(const String &entity_id, const String &prop) {
+    const char *entity_id_cstr = entity_id.utf8().get_data();
+    const char *prop_cstr = prop.utf8().get_data();
+    const int64_t *value = godot_project_get_state_int(fs, entity_id_cstr, prop_cstr);
+
+    if (value == nullptr) {
+				print_line("null pointer");
+        return 0; // todo: can we return null?
+    }
+    int64_t result = *value;
+    delete value;
+    return result;
+}
+
+void GodotProject::set_state_int(const String &entity_id, const String &prop, int64_t value) {
+    const char *entity_id_cstr = entity_id.utf8().get_data();
+    const char *prop_cstr = prop.utf8().get_data();
+
+    godot_project_set_state_int(fs, entity_id_cstr, prop_cstr, value);
+}
+
+
 void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("refresh"), &GodotProject::process);
 	ClassDB::bind_method(D_METHOD("stop"), &GodotProject::stop);
@@ -199,6 +223,8 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_changes"), &GodotProject::get_changes);
 	ClassDB::bind_method(D_METHOD("process"), &GodotProject::process);
 	ClassDB::bind_method(D_METHOD("get_branch_doc_id"), &GodotProject::get_branch_doc_id);
+	ClassDB::bind_method(D_METHOD("get_state_int", "entity_id", "prop"), &GodotProject::get_state_int);
+	ClassDB::bind_method(D_METHOD("set_state_int", "entity_id", "prop", "value"), &GodotProject::set_state_int);
 	ClassDB::bind_static_method(get_class_static(), SNAME("create"), &GodotProject::create);
 	ADD_SIGNAL(MethodInfo("files_changed"));
 	ADD_SIGNAL(MethodInfo("branches_changed"));

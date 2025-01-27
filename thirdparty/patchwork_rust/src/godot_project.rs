@@ -34,6 +34,7 @@ struct FileEntry {
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 struct GodotProjectDoc {
     files: HashMap<String, FileEntry>,
+    state: HashMap<String, HashMap<String, String>>,
 }
 
 type AutoMergeSignalCallback = extern "C" fn(*mut c_void, *const std::os::raw::c_char, *const *const std::os::raw::c_char, usize) -> ();
@@ -153,6 +154,7 @@ impl GodotProject_rs {
                     &mut tx,
                     GodotProjectDoc {
                         files: HashMap::new(),
+                        state: HashMap::new()
                     },
                 );
                 tx.commit();
@@ -795,6 +797,87 @@ impl GodotProject_rs {
             .to_string();
     }
 
+    // State api
+
+    fn set_state_int (&self, entity_id: String, prop: String, value: i64) {
+        let maybe_checked_out_doc_handle = self.doc_handle_map.get_handle(&self.checked_out_doc_id.lock().unwrap().clone().unwrap());
+
+        let checked_out_doc_handle = match maybe_checked_out_doc_handle {
+            Some(doc) => doc,
+            _ => {
+                println!("couldn't load checked out doc");
+                return
+            }   
+        };
+
+        
+        checked_out_doc_handle.with_doc_mut(|d| {
+            let mut tx = d.transaction();
+            let state = match tx.get_obj_id(ROOT, "state") {
+                Some(id) => id,
+                _ => {
+                    println!("failed to load state");
+                    return 
+                }
+            };
+
+
+            match tx.get_obj_id(&state, &entity_id) {
+                Some(id) => {
+                    let _ = tx.put(id, prop, value);
+                },                
+                
+                None => {
+                    match tx.put_object(state, &entity_id, ObjType::Map) {
+                        Ok(id) => {
+                            let _ = tx.put(id, prop, value);
+                        },
+                        Err(e) => {
+                            println!("failed to create state object: {:?}", e);
+                        }
+                    }
+                }
+            }
+        
+            tx.commit();        
+        });
+    }
+
+    fn get_state_int (&self, entity_id: String, prop: String) -> Option<i64>  {
+        let maybe_checked_out_doc = self.doc_state_map.get_doc(&self.checked_out_doc_id.lock().unwrap().clone().unwrap());
+
+        let checked_out_doc = match maybe_checked_out_doc {
+            Some(doc) => doc,
+            _ => {
+                println!("couldn't load checked out doc");
+                return None
+            }   
+        };
+
+       let state  = match checked_out_doc.get_obj_id(ROOT, "state") {
+            Some(id) => id,
+            None => {
+                println!("invalid document, no state property");
+                return None
+            }
+        };
+
+       let entity_id_clone = entity_id.clone();
+       let entity  = match checked_out_doc.get_obj_id(state, entity_id) {
+            Some(id) => id,
+            None => {
+                println!("entity {:?} does not exist", &entity_id_clone);
+                return None
+            }
+        };
+
+        return match checked_out_doc.get_int(entity, prop) {
+            Some(value) => Some(value),
+            None =>  None
+        
+        };
+    }
+
     // these functions below should be extracted into a separate SyncRepo class
 
     // SYNC
@@ -1286,6 +1369,7 @@ pub extern "C" fn godot_project_get_heads(godot_project: *const GodotProject_rs,
     ptr
 }
 //get_changes
+
 #[no_mangle]
 pub extern "C" fn godot_project_get_changes(godot_project: *const GodotProject_rs, _len: *mut u64) -> *const *const c_char {
     let godot_project = unsafe { &*godot_project };
@@ -1303,3 +1387,45 @@ pub extern "C" fn godot_project_get_changes(godot_project: *const GodotProject_r
 }
 
 // takes in a 
+
+// state sync function
+
+#[no_mangle]
+pub extern "C" fn godot_project_get_state_int(godot_project: *const GodotProject_rs, entity_id: *const std::os::raw::c_char, prop: *const std::os::raw::c_char) -> *const i64 {
+    let godot_project = unsafe { &*godot_project };
+    let entity_id = unsafe { std::ffi::CStr::from_ptr(entity_id) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    let prop = unsafe { std::ffi::CStr::from_ptr(prop) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    
+    match godot_project.get_state_int(entity_id, prop) {
+        Some(value) => {
+            let boxed = Box::new(value);
+            Box::into_raw(boxed)
+        },
+        None => {
+            println!("none");
+            return std::ptr::null()
+        }
+    }
+}
+
+
+#[no_mangle]
+pub extern "C" fn godot_project_set_state_int(godot_project: *const GodotProject_rs, entity_id: *const std::os::raw::c_char, prop: *const std::os::raw::c_char, value: i64) {
+    let godot_project = unsafe { &*godot_project };
+    let entity_id = unsafe { std::ffi::CStr::from_ptr(entity_id) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    let prop = unsafe { std::ffi::CStr::from_ptr(prop) }
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    godot_project.set_state_int(entity_id, prop, value);
+}
