@@ -26,6 +26,8 @@ public:
 
 	Variant get_file(const String &path);
 
+	Error save_file_at(const String &path, const Variant &heads, const Variant &content);
+
 	String get_doc_id() const;
 
 	String get_branch_doc_id() const;

@@ -85,6 +85,12 @@ Error GodotProject::save_file(const String &path, const Variant &content) {
 	return OK;
 }
 
+Error GodotProject::save_file_at(const String &path, const Variant &heads, const Variant &content) {
+	print_line("save " + String(heads));
+
+	return OK;
+}
+
 Variant GodotProject::get_file(const String &path) {
 	uint8_t is_binary;
 	uint64_t length;
@@ -238,6 +244,7 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("refresh"), &GodotProject::process);
 	ClassDB::bind_method(D_METHOD("stop"), &GodotProject::stop);
 	ClassDB::bind_method(D_METHOD("save_file", "path", "content"), &GodotProject::save_file);
+	ClassDB::bind_method(D_METHOD("save_file_at", "path", "heads", "content"), &GodotProject::save_file_at);
 	ClassDB::bind_method(D_METHOD("get_file", "path"), &GodotProject::get_file);
 	ClassDB::bind_method(D_METHOD("get_doc_id"), &GodotProject::get_doc_id);
 	ClassDB::bind_method(D_METHOD("get_branches"), &GodotProject::get_branches);
