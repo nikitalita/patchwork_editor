@@ -1,6 +1,9 @@
 #include "godot_project.h"
 #include "core/object/object.h"
 
+#include <editor/editor_node.h>
+#include <editor/editor_undo_redo_manager.h>
+
 void GodotProject::_signal_callback(void *signal_user_data, const char *signal, const char *const *p_args, size_t p_args_len) {
 	Vector<String> args;
 	ERR_FAIL_COND_MSG(p_args_len % 2 != 0, "Expected an even number of arguments");
@@ -15,12 +18,27 @@ void GodotProject::signal_callback(const String &signal, const Vector<String> &a
 	if (String(signal) == "files_changed") {
 		emit_signal(SNAME("files_changed"));
 	} else if (String(signal) == "checked_out_branch") {
-		emit_signal(SNAME("checked_out_branch")/*, args[0]*/);
+		emit_signal(SNAME("checked_out_branch") /*, args[0]*/);
 	} else if (String(signal) == "branches_changed") {
 		emit_signal(SNAME("branches_changed"));
 	} else {
 		ERR_FAIL_MSG("Unknown signal: " + String(signal));
 	}
+}
+bool GodotProject::unsaved_files_open() const {
+	auto opened_scenes = EditorNode::get_editor_data().get_edited_scenes();
+	for (int i = 0; i < opened_scenes.size(); i++) {
+		auto id = opened_scenes[i].history_id;
+		if (EditorUndoRedoManager::get_singleton()->is_history_unsaved(id)) {
+			return true;
+		}
+	}
+	// Not bound
+	if (EditorUndoRedoManager::get_singleton()->is_history_unsaved(EditorUndoRedoManager::GLOBAL_HISTORY)) {
+		return true;
+	}
+	// do the same for scripts
+	return false;
 }
 
 GodotProject *GodotProject::create(const String &maybe_fs_doc_id) {
@@ -234,6 +252,8 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_branch_doc_id"), &GodotProject::get_branch_doc_id);
 	ClassDB::bind_method(D_METHOD("get_state_int", "entity_id", "prop"), &GodotProject::get_state_int);
 	ClassDB::bind_method(D_METHOD("set_state_int", "entity_id", "prop", "value"), &GodotProject::set_state_int);
+	//unsaved_files_open()
+	ClassDB::bind_method(D_METHOD("unsaved_files_open"), &GodotProject::unsaved_files_open);
 	ClassDB::bind_static_method(get_class_static(), SNAME("create"), &GodotProject::create);
 	ADD_SIGNAL(MethodInfo("files_changed"));
 	ADD_SIGNAL(MethodInfo("branches_changed"));
