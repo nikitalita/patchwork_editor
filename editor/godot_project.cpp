@@ -100,7 +100,7 @@ Variant GodotProject::get_file(const String &path) {
 	} else {
 		auto str = String::utf8(buf_ptr, length);
 		variant = str;
-	}
+	}	
 	godot_project_free_string(buf_ptr);
 	return variant;
 }
@@ -201,6 +201,39 @@ void GodotProject::_notification(int p_what) {
 	}
 }
 
+// State sync functions 
+
+int64_t GodotProject::get_state_int(const String &entity_id, const String &prop) {
+CharString entity_id_utf8 = entity_id.utf8();
+    CharString prop_utf8 = prop.utf8();
+    
+    const char *entity_id_cstr = entity_id_utf8.get_data();
+    const char *prop_cstr = prop_utf8.get_data();
+
+    const int64_t *value = godot_project_get_state_int(fs, entity_id_cstr, prop_cstr);
+
+    if (value == nullptr) {
+        return 0; // todo: can we return null?
+    }
+    int64_t result = *value;
+
+		// todo: do we need to free value?
+
+    return result;
+}
+
+void GodotProject::set_state_int(const String &entity_id, const String &prop, int64_t value) {
+	// Keep the CharString objects alive for the duration of the function
+	CharString entity_id_utf8 = entity_id.utf8();
+	CharString prop_utf8 = prop.utf8();
+
+	const char *entity_id_cstr = entity_id_utf8.get_data();
+	const char *prop_cstr = prop_utf8.get_data();
+
+	godot_project_set_state_int(fs, entity_id_cstr, prop_cstr, value);
+}
+
+
 void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("refresh"), &GodotProject::process);
 	ClassDB::bind_method(D_METHOD("stop"), &GodotProject::stop);
@@ -217,6 +250,8 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_changes"), &GodotProject::get_changes);
 	ClassDB::bind_method(D_METHOD("process"), &GodotProject::process);
 	ClassDB::bind_method(D_METHOD("get_branch_doc_id"), &GodotProject::get_branch_doc_id);
+	ClassDB::bind_method(D_METHOD("get_state_int", "entity_id", "prop"), &GodotProject::get_state_int);
+	ClassDB::bind_method(D_METHOD("set_state_int", "entity_id", "prop", "value"), &GodotProject::set_state_int);
 	//unsaved_files_open()
 	ClassDB::bind_method(D_METHOD("unsaved_files_open"), &GodotProject::unsaved_files_open);
 	ClassDB::bind_static_method(get_class_static(), SNAME("create"), &GodotProject::create);
