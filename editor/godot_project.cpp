@@ -76,18 +76,25 @@ Error GodotProject::save_file(const String &path, const Variant &content) {
 	// TODO: make godot_project_save_file return an error code
 	if (content.get_type() == Variant::STRING) {
 		auto content_str = content.operator String().utf8();
-		godot_project_save_file(fs, path.utf8().get_data(), content_str.get_data(), content_str.size(), false);
+		godot_project_save_file(fs, path.utf8().get_data(), "", content_str.get_data(), content_str.size(), false);
 	} else if (content.get_type() == Variant::PACKED_BYTE_ARRAY) {
-		godot_project_save_file(fs, path.utf8().get_data(), (const char *)content.operator PackedByteArray().ptr(), content.operator PackedByteArray().size(), true);
+		godot_project_save_file(fs, path.utf8().get_data(), "", (const char *)content.operator PackedByteArray().ptr(), content.operator PackedByteArray().size(), true);
 	} else {
 		ERR_FAIL_V_MSG(ERR_INVALID_PARAMETER, "Unsupported content type: " + String::num_int64(content.get_type()));
 	}
 	return OK;
 }
 
-Error GodotProject::save_file_at(const String &path, const Variant &heads, const Variant &content) {
-	print_line("save " + String(heads));
-
+Error GodotProject::save_file_at(const String &path, const String &heads, const Variant &content) {
+	// TODO: make godot_project_save_file return an error code
+	if (content.get_type() == Variant::STRING) {
+		auto content_str = content.operator String().utf8();
+		godot_project_save_file(fs, path.utf8().get_data(), heads.utf8().get_data(), content_str.get_data(), content_str.size(), false);
+	} else if (content.get_type() == Variant::PACKED_BYTE_ARRAY) {
+		godot_project_save_file(fs, path.utf8().get_data(), heads.utf8().get_data(), (const char *)content.operator PackedByteArray().ptr(), content.operator PackedByteArray().size(), true);
+	} else {
+		ERR_FAIL_V_MSG(ERR_INVALID_PARAMETER, "Unsupported content type: " + String::num_int64(content.get_type()));
+	}
 	return OK;
 }
 

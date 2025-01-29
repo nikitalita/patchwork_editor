@@ -8,7 +8,7 @@ use std::{
 };
 use ::safer_ffi::prelude::*;
 
-use automerge::{transaction::Transactable, Automerge, ChangeHash, ObjType, ReadDoc, ROOT};
+use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
 use autosurgeon::{bytes, hydrate, reconcile, Hydrate, Reconcile};
 use futures::StreamExt;
@@ -562,8 +562,7 @@ impl GodotProject_rs {
     }
 
     // #[func]
-    fn save_file(&self, path: String, content: StringOrPackedByteArray) {
-        let path_clone = path.clone();
+    fn save_file(&self, path: String, heads: Option<Vec<ChangeHash>>, content: StringOrPackedByteArray) {
         let checked_out_doc_id = self.get_checked_out_doc_id();
         let checked_out_doc_id_clone = checked_out_doc_id.clone();
 
@@ -571,7 +570,17 @@ impl GodotProject_rs {
 
         if let Some(project_doc_handle) = checked_out_doc_handle {
             project_doc_handle.with_doc_mut(|d| {
-                let mut tx = d.transaction();
+                let mut tx = match heads {
+                    Some(heads) => {
+                        println!("change at heads {:?}", heads);
+
+                        d.transaction_at(PatchLog::inactive(TextRepresentation::String), &heads)
+                    },
+                    None => {
+                        println!("don't have heads");
+                        d.transaction()
+                    }
+                };
 
                 let files = match tx.get(ROOT, "files") {
                     Ok(Some((automerge::Value::Object(ObjType::Map), files))) => files,
@@ -1216,26 +1225,45 @@ pub extern "C" fn godot_project_process(godot_project: *mut GodotProject_rs) {
 }
 
 #[no_mangle]
-pub extern "C" fn godot_project_save_file(
-    godot_project: *const GodotProject_rs, path: *const std::os::raw::c_char, content: *const std::os::raw::c_char, content_len: usize, binary: bool) {
+pub extern "C" fn godot_project_save_file(    
+    godot_project: *const GodotProject_rs, 
+    path: *const std::os::raw::c_char, 
+    heads: *const std::os::raw::c_char, // todo: heads should be an vec of strings
+    content: *const std::os::raw::c_char, 
+    content_len: usize, 
+    binary: bool
+) {
     let godot_project = unsafe { &*godot_project };
     let path = unsafe { std::ffi::CStr::from_ptr(path) }
         .to_str()
         .unwrap()
-        .to_string();
-    // use content_len
+        .to_string();    
+
+
+    let heads_str = unsafe { std::ffi::CStr::from_ptr(heads) }
+    .to_str()
+    .unwrap()
+    .to_string();    
+
+    let heads: Option<Vec<ChangeHash>> = if heads_str.is_empty() {
+        None
+    } else {
+        Some(heads_str.split(",").map(|h| ChangeHash::from_str(h).unwrap()).collect())
+    };
+
     if binary {
         let content_u8 = unsafe { std::slice::from_raw_parts(content as *const u8, content_len) };
         let content = StringOrPackedByteArray::PackedByteArray(content_u8.to_vec());
-        godot_project.save_file(path, content);
+        godot_project.save_file(path, heads, content);
     } else {
         let content = StringOrPackedByteArray::String(unsafe { std::ffi::CStr::from_ptr(content) }
             .to_str()
             .unwrap()
             .to_string());
-        godot_project.save_file(path, content);
+        godot_project.save_file(path, heads, content);
     }
 }
+
 
 #[no_mangle]
 pub extern "C" fn godot_project_destroy(godot_project: *mut GodotProject_rs) {

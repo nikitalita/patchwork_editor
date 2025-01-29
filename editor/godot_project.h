@@ -23,10 +23,9 @@ public:
 	void stop();
 
 	Error save_file(const String &path, const Variant &content);
+	Error save_file_at(const String &path, const String &heads, const Variant &content);
 
 	Variant get_file(const String &path);
-
-	Error save_file_at(const String &path, const Variant &heads, const Variant &content);
 
 	String get_doc_id() const;
 
