@@ -1188,6 +1188,17 @@ pub extern "C" fn godot_project_free_vec_string(s: *const *const std::os::raw::c
     }
 }
 
+#[no_mangle] // free u8 array
+pub extern "C" fn godot_project_free_u8_vec(s: *const u8, len: usize) {
+    unsafe {
+        if s.is_null() {
+            return;
+        }
+        drop(Vec::from_raw_parts(s as *mut u8, len, len));
+    }
+}
+
+
 
 #[no_mangle]
 pub extern "C" fn godot_project_create(
@@ -1307,7 +1318,10 @@ pub extern "C" fn godot_project_get_checked_out_branch_id(godot_project: *const 
 }
 
 #[no_mangle]
-pub extern "C" fn godot_project_get_file(godot_project: *const GodotProject_rs, path: *const std::os::raw::c_char, r_len: *mut u64, r_is_binary: *mut u8) -> *const std::os::raw::c_char {
+// pass back a u8 pointer
+pub extern "C" fn godot_project_get_file(godot_project: *const GodotProject_rs, path: *const std::os::raw::c_char, r_len: *mut u64, r_is_binary: *mut u8) -> *const std::os::raw::c_uchar {  
+                                                                                                                                                          
+                                                                                                                                                          
     let godot_project = unsafe { &*godot_project };
     let path = unsafe { std::ffi::CStr::from_ptr(path) }
         .to_str()
@@ -1321,15 +1335,17 @@ pub extern "C" fn godot_project_get_file(godot_project: *const GodotProject_rs, 
                 r_len.write(s.len() as u64);
             };
             let c_string = std::ffi::CString::new(s).unwrap();
-            c_string.into_raw()
+            // cast to u8
+            c_string.into_raw() as *const u8
         },
         Some(StringOrPackedByteArray::PackedByteArray(bytes)) => {
             unsafe {
                 r_is_binary.write(1);
                 r_len.write(bytes.len() as u64);
             };
-            let c_string = std::ffi::CString::new("binary").unwrap();
-            c_string.into_raw()
+            let ptr = bytes.as_ptr();
+            std::mem::forget(bytes);
+            ptr
         },
         None => std::ptr::null()
     }

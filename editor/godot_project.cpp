@@ -1,6 +1,7 @@
 #include "godot_project.h"
 #include "core/object/object.h"
 
+#include <core/io/dir_access.h>
 #include <editor/editor_node.h>
 #include <editor/editor_undo_redo_manager.h>
 
@@ -285,11 +286,13 @@ Variant GodotProject::get_file(const String &path) {
 			arr.set(i, buf_ptr[i]);
 		}
 		variant = arr;
+		godot_project_free_u8_vec(buf_ptr, length);
 	} else {
-		auto str = String::utf8(buf_ptr, length);
+		auto str_ptr = reinterpret_cast<const char *>(buf_ptr);
+		auto str = String::utf8(str_ptr, length);
 		variant = str;
+		godot_project_free_string(str_ptr);
 	}	
-	godot_project_free_string(buf_ptr);
 	return variant;
 }
 
