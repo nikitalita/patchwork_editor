@@ -424,6 +424,54 @@ void GodotProject::set_state_int(const String &entity_id, const String &prop, in
 	godot_project_set_state_int(fs, entity_id_cstr, prop_cstr, value);
 }
 
+Vector<String> GodotProject::get_recursive_dir_list(const String &p_dir, const Vector<String> &wildcards, const bool absolute, const String &rel) {
+	Vector<String> ret;
+	Error err;
+	Ref<DirAccess> da = DirAccess::open(p_dir.path_join(rel), &err);
+	ERR_FAIL_COND_V_MSG(da.is_null(), ret, "Failed to open directory " + p_dir);
+
+	if (da.is_null()) {
+		return ret;
+	}
+	Vector<String> dirs;
+	Vector<String> files;
+
+	String base = absolute ? p_dir : "";
+	da->list_dir_begin();
+	String f = da->get_next();
+	while (!f.is_empty()) {
+		if (f == "." || f == "..") {
+			f = da->get_next();
+			continue;
+		} else if (da->current_is_dir()) {
+			dirs.push_back(f);
+		} else {
+			files.push_back(f);
+		}
+		f = da->get_next();
+	}
+	da->list_dir_end();
+
+	dirs.sort_custom<FileNoCaseComparator>();
+	files.sort_custom<FileNoCaseComparator>();
+	for (auto &d : dirs) {
+		ret.append_array(get_recursive_dir_list(p_dir, wildcards, absolute, rel.path_join(d)));
+	}
+	for (auto &file : files) {
+		if (wildcards.size() > 0) {
+			for (int i = 0; i < wildcards.size(); i++) {
+				if (file.get_file().matchn(wildcards[i])) {
+					ret.append(base.path_join(rel).path_join(file));
+					break;
+				}
+			}
+		} else {
+			ret.append(base.path_join(rel).path_join(file));
+		}
+	}
+
+	return ret;
+}
 
 void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("refresh"), &GodotProject::process);
@@ -447,6 +495,7 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("unsaved_files_open"), &GodotProject::unsaved_files_open);
 	ClassDB::bind_static_method(get_class_static(), SNAME("create"), &GodotProject::create);
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("detect_utf8", "buffer"), &GodotProject::detect_utf8);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_recursive_dir_list", "dir", "wildcards", "absolute", "rel"), &GodotProject::get_recursive_dir_list, DEFVAL(Vector<String>()), DEFVAL(true), DEFVAL(""));
 	ADD_SIGNAL(MethodInfo("files_changed"));
 	ADD_SIGNAL(MethodInfo("branches_changed"));
 	ADD_SIGNAL(MethodInfo("checked_out_branch" /*,PropertyInfo(Variant::STRING, "branch_id")*/));

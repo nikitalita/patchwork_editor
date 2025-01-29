@@ -37,8 +37,6 @@ public:
 	String create_branch(const String &name);
 
 	void merge_branch(const String &branch_id);
-	bool unsaved_files_open() const;
-	static bool detect_utf8(const PackedByteArray &p_utf8_buf);
 
 	String get_checked_out_branch_id() const;
 	Vector<String> list_all_files();
@@ -47,6 +45,11 @@ public:
 
 	int64_t get_state_int(const String &entity_id, const String &prop);
 	void set_state_int(const String &entity_id, const String &prop, int64_t value);
+
+	// TODO: Utility functions, maybe move elsewhere?
+	bool unsaved_files_open() const;
+	static bool detect_utf8(const PackedByteArray &p_utf8_buf);
+	static Vector<String> get_recursive_dir_list(const String &p_dir, const Vector<String> &wildcards = {}, bool absolute = true, const String &rel = "");
 
 protected:
 	static void _bind_methods();
