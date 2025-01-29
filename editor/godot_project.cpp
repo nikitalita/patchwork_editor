@@ -25,6 +25,8 @@ void GodotProject::signal_callback(const String &signal, const Vector<String> &a
 		ERR_FAIL_MSG("Unknown signal: " + String(signal));
 	}
 }
+
+// TODO: maybe move this into a seperate class?
 bool GodotProject::unsaved_files_open() const {
 	auto opened_scenes = EditorNode::get_editor_data().get_edited_scenes();
 	for (int i = 0; i < opened_scenes.size(); i++) {
@@ -39,6 +41,192 @@ bool GodotProject::unsaved_files_open() const {
 	}
 	// do the same for scripts
 	return false;
+}
+
+bool GodotProject::detect_utf8(const PackedByteArray &p_utf8_buf) {
+	int cstr_size = 0;
+	int str_size = 0;
+	const char *p_utf8 = (const char *)p_utf8_buf.ptr();
+	int p_len = p_utf8_buf.size();
+	if (p_len == 0) {
+		return true; // empty string
+	}
+	bool p_skip_cr = false;
+	/* HANDLE BOM (Byte Order Mark) */
+	if (p_len < 0 || p_len >= 3) {
+		bool has_bom = uint8_t(p_utf8[0]) == 0xef && uint8_t(p_utf8[1]) == 0xbb && uint8_t(p_utf8[2]) == 0xbf;
+		if (has_bom) {
+			//8-bit encoding, byte order has no meaning in UTF-8, just skip it
+			if (p_len >= 0) {
+				p_len -= 3;
+			}
+			p_utf8 += 3;
+		}
+	}
+
+	bool decode_error = false;
+	bool decode_failed = false;
+	{
+		const char *ptrtmp = p_utf8;
+		const char *ptrtmp_limit = p_len >= 0 ? &p_utf8[p_len] : nullptr;
+		int skip = 0;
+		uint8_t c_start = 0;
+		while (ptrtmp != ptrtmp_limit && *ptrtmp) {
+#if CHAR_MIN == 0
+			uint8_t c = *ptrtmp;
+#else
+			uint8_t c = *ptrtmp >= 0 ? *ptrtmp : uint8_t(256 + *ptrtmp);
+#endif
+
+			if (skip == 0) {
+				if (p_skip_cr && c == '\r') {
+					ptrtmp++;
+					continue;
+				}
+				/* Determine the number of characters in sequence */
+				if ((c & 0x80) == 0) {
+					skip = 0;
+				} else if ((c & 0xe0) == 0xc0) {
+					skip = 1;
+				} else if ((c & 0xf0) == 0xe0) {
+					skip = 2;
+				} else if ((c & 0xf8) == 0xf0) {
+					skip = 3;
+				} else if ((c & 0xfc) == 0xf8) {
+					skip = 4;
+				} else if ((c & 0xfe) == 0xfc) {
+					skip = 5;
+				} else {
+					skip = 0;
+					// print_unicode_error(vformat("Invalid UTF-8 leading byte (%x)", c), true);
+					// decode_failed = true;
+					return false;
+				}
+				c_start = c;
+
+				if (skip == 1 && (c & 0x1e) == 0) {
+					// print_unicode_error(vformat("Overlong encoding (%x ...)", c));
+					// decode_error = true;
+					return false;
+				}
+				str_size++;
+			} else {
+				if ((c_start == 0xe0 && skip == 2 && c < 0xa0) || (c_start == 0xf0 && skip == 3 && c < 0x90) || (c_start == 0xf8 && skip == 4 && c < 0x88) || (c_start == 0xfc && skip == 5 && c < 0x84)) {
+					// print_unicode_error(vformat("Overlong encoding (%x %x ...)", c_start, c));
+					// decode_error = true;
+					return false;
+				}
+				if (c < 0x80 || c > 0xbf) {
+					// print_unicode_error(vformat("Invalid UTF-8 continuation byte (%x ... %x ...)", c_start, c), true);
+					// decode_failed = true;
+					return false;
+
+					// skip = 0;
+				} else {
+					--skip;
+				}
+			}
+
+			cstr_size++;
+			ptrtmp++;
+		}
+		// not checking for last sequence because we pass in incomplete bytes
+		// if (skip) {
+		// print_unicode_error(vformat("Missing %d UTF-8 continuation byte(s)", skip), true);
+		// decode_failed = true;
+		// return false;
+		// }
+	}
+
+	if (str_size == 0) {
+		// clear();
+		return true; // empty string
+	}
+
+	// resize(str_size + 1);
+	// char32_t *dst = ptrw();
+	// dst[str_size] = 0;
+
+	int skip = 0;
+	uint32_t unichar = 0;
+	while (cstr_size) {
+#if CHAR_MIN == 0
+		uint8_t c = *p_utf8;
+#else
+		uint8_t c = *p_utf8 >= 0 ? *p_utf8 : uint8_t(256 + *p_utf8);
+#endif
+
+		if (skip == 0) {
+			if (p_skip_cr && c == '\r') {
+				p_utf8++;
+				continue;
+			}
+			/* Determine the number of characters in sequence */
+			if ((c & 0x80) == 0) {
+				// *(dst++) = c;
+				unichar = 0;
+				skip = 0;
+			} else if ((c & 0xe0) == 0xc0) {
+				unichar = (0xff >> 3) & c;
+				skip = 1;
+			} else if ((c & 0xf0) == 0xe0) {
+				unichar = (0xff >> 4) & c;
+				skip = 2;
+			} else if ((c & 0xf8) == 0xf0) {
+				unichar = (0xff >> 5) & c;
+				skip = 3;
+			} else if ((c & 0xfc) == 0xf8) {
+				unichar = (0xff >> 6) & c;
+				skip = 4;
+			} else if ((c & 0xfe) == 0xfc) {
+				unichar = (0xff >> 7) & c;
+				skip = 5;
+			} else {
+				// *(dst++) = _replacement_char;
+				// unichar = 0;
+				// skip = 0;
+				return false;
+			}
+		} else {
+			if (c < 0x80 || c > 0xbf) {
+				// *(dst++) = _replacement_char;
+				skip = 0;
+			} else {
+				unichar = (unichar << 6) | (c & 0x3f);
+				--skip;
+				if (skip == 0) {
+					if (unichar == 0) {
+						return false;
+						// print_unicode_error("NUL character", true);
+						// decode_failed = true;
+						// unichar = _replacement_char;
+					} else if ((unichar & 0xfffff800) == 0xd800) {
+						return false;
+
+						// print_unicode_error(vformat("Unpaired surrogate (%x)", unichar), true);
+						// decode_failed = true;
+						// unichar = _replacement_char;
+					} else if (unichar > 0x10ffff) {
+						return false;
+
+						// print_unicode_error(vformat("Invalid unicode codepoint (%x)", unichar), true);
+						// decode_failed = true;
+						// unichar = _replacement_char;
+					}
+					// *(dst++) = unichar;
+				}
+			}
+		}
+
+		cstr_size--;
+		p_utf8++;
+	}
+	if (skip) {
+		// return false;
+		// *(dst++) = 0x20;
+	}
+
+	return true;
 }
 
 GodotProject *GodotProject::create(const String &maybe_fs_doc_id) {
@@ -255,6 +443,7 @@ void GodotProject::_bind_methods() {
 	//unsaved_files_open()
 	ClassDB::bind_method(D_METHOD("unsaved_files_open"), &GodotProject::unsaved_files_open);
 	ClassDB::bind_static_method(get_class_static(), SNAME("create"), &GodotProject::create);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("detect_utf8", "buffer"), &GodotProject::detect_utf8);
 	ADD_SIGNAL(MethodInfo("files_changed"));
 	ADD_SIGNAL(MethodInfo("branches_changed"));
 	ADD_SIGNAL(MethodInfo("checked_out_branch" /*,PropertyInfo(Variant::STRING, "branch_id")*/));

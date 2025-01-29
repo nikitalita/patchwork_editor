@@ -38,6 +38,7 @@ public:
 
 	void merge_branch(const String &branch_id);
 	bool unsaved_files_open() const;
+	static bool detect_utf8(const PackedByteArray &p_utf8_buf);
 
 	String get_checked_out_branch_id() const;
 	Vector<String> list_all_files();
