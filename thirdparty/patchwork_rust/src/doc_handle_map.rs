@@ -20,7 +20,14 @@ impl DocHandleMap {
     }
 
     pub(crate) fn add_handle(&self, handle: DocHandle) {
-        self.handles.lock().unwrap().insert(handle.document_id(), handle.clone());
+        let mut handles = self.handles.lock().unwrap();
+    
+        // ignore if doc is already in the map
+        if handles.contains_key(&handle.document_id()) {
+            return;
+        }
+        
+        handles.insert(handle.document_id(), handle.clone());
         self.new_tx.unbounded_send(handle).unwrap();
     }
 
