@@ -168,7 +168,6 @@ add_custom_command(
         src/godot_scene.rs
         src/godot_project.rs
         src/doc_handle_map.rs
-        src/doc_state_map.rs
         ${PROJECT_SOURCE_DIR}/build.rs
         ${PROJECT_SOURCE_DIR}/cmake/Cargo.toml.in
         WORKING_DIRECTORY

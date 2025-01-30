@@ -17,7 +17,7 @@ use std::os::raw::c_char;
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
 
-use crate::{doc_state_map::DocStateMap, doc_utils::SimpleDocReader, doc_handle_map::DocHandleMap};
+use crate::{doc_utils::SimpleDocReader, doc_handle_map::DocHandleMap};
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 struct BinaryFile {
@@ -73,7 +73,6 @@ pub struct GodotProject_rs {
     repo_handle: RepoHandle,
     branches_metadata_doc_id: DocumentId,
     checked_out_doc_id: Arc<Mutex<Option<DocumentId>>>,
-    doc_state_map: DocStateMap,
     doc_handle_map: DocHandleMap,
     signal_user_data: *mut c_void,
     signal_callback: AutoMergeSignalCallback,
@@ -140,7 +139,6 @@ impl GodotProject_rs {
 
         let (new_doc_tx, new_doc_rx) = futures::channel::mpsc::unbounded();
 
-        let doc_state_map = DocStateMap::new();
         let doc_handle_map = DocHandleMap::new(new_doc_tx.clone());
 
         let checked_out_doc_id = Arc::new(Mutex::new(None));
@@ -180,14 +178,7 @@ impl GodotProject_rs {
 
             // Add both docs to the states
             {
-                doc_state_map.add_doc(project_doc_id, project_doc_handle.with_doc(|d| d.clone()));
                 doc_handle_map.add_handle(project_doc_handle.clone());
-
-                // Add branches metadata doc
-                doc_state_map.add_doc(
-                    branches_metadata_doc_handle.document_id(),
-                    branches_metadata_doc_handle.with_doc(|d| d.clone()),
-                );
                 doc_handle_map.add_handle(branches_metadata_doc_handle.clone());
             }
 
@@ -204,7 +195,6 @@ impl GodotProject_rs {
             let branches_metadata_doc_id_clone_2 = branches_metadata_doc_id.clone();
 
             let repo_handle_clone = repo_handle.clone();
-            let doc_state_map = doc_state_map.clone();
             let doc_handle_map = doc_handle_map.clone();
             let checked_out_doc_id = checked_out_doc_id.clone();
 
@@ -239,26 +229,15 @@ impl GodotProject_rs {
 
                 // Add both docs to the states
                 {
-                    let main_doc = main_doc_handle_result.with_doc(|d| d.clone());
-
                     // Add main doc
-                    doc_state_map.add_doc(main_doc_id_clone.clone(), main_doc);
                     doc_handle_map.add_handle(main_doc_handle_result.clone());
 
                     // Add other branches
-                    for (branch_doc_id, branch_doc_handle) in other_branches {
-                        doc_state_map.add_doc(
-                            branch_doc_id.clone(),
-                            branch_doc_handle.with_doc(|d| d.clone()),
-                        );
+                    for (_, branch_doc_handle) in other_branches {
                         doc_handle_map.add_handle(branch_doc_handle);
                     }
 
                     // Add branches metadata doc
-                    doc_state_map.add_doc(
-                        branches_metadata_doc_id_clone.clone(),
-                        repo_handle_result.with_doc(|d| d.clone()),
-                    );
                     doc_handle_map.add_handle(repo_handle_result);
                 }
 
@@ -279,7 +258,6 @@ impl GodotProject_rs {
             &runtime,
             new_doc_rx,
             doc_handle_map.clone(),
-            doc_state_map.clone(),
             sync_event_sender.clone(),
         );
 
@@ -290,7 +268,6 @@ impl GodotProject_rs {
             branches_metadata_doc_id,
             checked_out_doc_id,
             doc_handle_map,
-            doc_state_map,
             sync_event_receiver,
             signal_user_data,
             signal_callback,
@@ -335,7 +312,7 @@ impl GodotProject_rs {
     fn get_heads(&self) -> Vec<String> /* String[] */ {
         let checked_out_doc_id = self.get_checked_out_doc_id();
 
-        let doc = self.doc_state_map.get_doc(&checked_out_doc_id).unwrap_or_else(|| {
+        let doc = self.doc_handle_map.get_doc(&checked_out_doc_id).unwrap_or_else(|| {
             panic!(
                 "Failed to get doc for checked out doc id: {}",
                 &checked_out_doc_id
@@ -373,7 +350,7 @@ impl GodotProject_rs {
     // #[func]
     fn list_all_files(&self) -> Vec<String> /* String[] */ {
         let doc = self
-            .doc_state_map
+            .doc_handle_map
             .get_doc(&self.get_checked_out_doc_id())
             .unwrap_or_else(|| panic!("Failed to get checked out doc"));
 
@@ -441,7 +418,7 @@ impl GodotProject_rs {
     // }
     fn get_file(&self, path: String) -> Option<StringOrPackedByteArray> {
         let doc = self
-            .doc_state_map
+            .doc_handle_map
             .get_doc(&self.get_checked_out_doc_id())
             .unwrap_or_else(|| panic!("Failed to get checked out doc"));
 
@@ -478,7 +455,7 @@ impl GodotProject_rs {
             };
 
             // read content doc
-            let content_doc = match self.doc_state_map.get_doc(&doc_id) {
+            let content_doc = match self.doc_handle_map.get_doc(&doc_id) {
                 Some(doc) => doc,
                 _ => return None
             };
@@ -518,7 +495,7 @@ impl GodotProject_rs {
     fn get_file_at(&self, path: String, heads: Vec<String> /* String[] */) -> Option<String> /* String? */
     {
         let doc = self
-            .doc_state_map
+            .doc_handle_map
             .get_doc(&self.get_checked_out_doc_id())
             .unwrap_or_else(|| panic!("Failed to get checked out doc"));
 
@@ -550,7 +527,7 @@ impl GodotProject_rs {
     // }
     fn get_changes(&self) -> Vec<String> /* String[]  */ {
         let doc = self
-            .doc_state_map
+            .doc_handle_map
             .get_doc(&self.get_checked_out_doc_id())
             .unwrap_or_else(|| panic!("Failed to get checked out doc"));
 
@@ -564,7 +541,6 @@ impl GodotProject_rs {
     // #[func]
     fn save_file(&self, path: String, heads: Option<Vec<ChangeHash>>, content: StringOrPackedByteArray) {
         let checked_out_doc_id = self.get_checked_out_doc_id();
-        let checked_out_doc_id_clone = checked_out_doc_id.clone();
 
         let checked_out_doc_handle = self.get_doc_handle(checked_out_doc_id.clone());
 
@@ -625,12 +601,8 @@ impl GodotProject_rs {
                     },
                 }
 
-
                 tx.commit();
             });
-
-            let new_doc = project_doc_handle.with_doc(|d| d.clone());
-            self.doc_state_map.add_doc(checked_out_doc_id_clone, new_doc);
         } else {
             println!("too early {:?}", path)
         }
@@ -638,7 +610,7 @@ impl GodotProject_rs {
 
     fn merge_branch(&self, branch_id: String) {
         let branches_metadata_doc = self
-            .doc_state_map
+            .doc_handle_map
             .get_doc(&self.branches_metadata_doc_id)
             .unwrap();
 
@@ -673,7 +645,7 @@ impl GodotProject_rs {
     // #[func]
     fn create_branch(&self, name: String) -> String {
         let branches_metadata_doc = self
-            .doc_state_map
+            .doc_handle_map
             .get_doc(&self.branches_metadata_doc_id)
             .unwrap_or_else(|| panic!("Failed to load branches metadata doc"));
 
@@ -705,7 +677,7 @@ impl GodotProject_rs {
     fn checkout_branch(&mut self, branch_id: String) {
         let doc_id = if branch_id == "main" {
             let branches_metadata_doc = self
-                .doc_state_map
+                .doc_handle_map
                 .get_doc(&self.branches_metadata_doc_id)
                 .unwrap_or_else(|| panic!("couldn't load branches metadata doc {}", branch_id));
 
@@ -853,7 +825,7 @@ impl GodotProject_rs {
     }
 
     fn get_state_int (&self, entity_id: String, prop: String) -> Option<i64>  {
-        let maybe_checked_out_doc = self.doc_state_map.get_doc(&self.checked_out_doc_id.lock().unwrap().clone().unwrap());
+        let maybe_checked_out_doc = self.doc_handle_map.get_doc(&self.checked_out_doc_id.lock().unwrap().clone().unwrap());
 
         let checked_out_doc = match maybe_checked_out_doc {
             Some(doc) => doc,
@@ -910,7 +882,7 @@ impl GodotProject_rs {
 
                         // load branches metadata doc
                         let doc = self
-                            .doc_state_map
+                            .doc_handle_map
                             .get_doc(&self.branches_metadata_doc_id)
                             .unwrap_or_else(|| panic!("Failed to get branches metadata doc"));
                         
@@ -972,8 +944,7 @@ impl GodotProject_rs {
     fn spawn_sync_task(
         runtime: &Runtime,
         mut new_docs: futures::channel::mpsc::UnboundedReceiver<DocHandle>,
-        doc_handle_map: DocHandleMap,    
-        doc_state_map: DocStateMap,
+        doc_handle_map: DocHandleMap,
         sync_event_sender: Sender<SyncEvent>,
     ) {
         let initial_handles = doc_handle_map
@@ -1007,13 +978,6 @@ impl GodotProject_rs {
             loop {
                 futures::select! {
                     sync_event = all_doc_changes.select_next_some() => {
-
-                        // update stored state of doc
-                        let SyncEvent::DocChanged { doc_id } = sync_event.clone();
-                        let doc_handle = doc_handle_map.get_handle(&doc_id.clone()).unwrap();
-                        let doc = doc_handle.with_doc(|d| d.clone());
-                        doc_state_map.add_doc(doc_id.clone(), doc);
-
                         // emit change event
                         sync_event_sender.send(sync_event).unwrap();                    
                     }
@@ -1049,8 +1013,6 @@ impl GodotProject_rs {
     {
         if let Some(doc_handle) = self.doc_handle_map.get_handle(&doc_id) {
             doc_handle.with_doc_mut(f);
-            let new_doc = doc_handle.with_doc(|d| d.clone());
-            self.doc_state_map.add_doc(doc_id, new_doc);
         }
     }
 
@@ -1071,18 +1033,13 @@ impl GodotProject_rs {
 
     fn request_doc(&self, doc_id: DocumentId) {
         let repo_handle = self.repo_handle.clone();
-        let doc_state_map = self.doc_state_map.clone();
         let doc_handle_map = self.doc_handle_map.clone();
-        let doc_id_clone = doc_id.clone();
 
         self.runtime.spawn(async move {
             let repo_handle_result = repo_handle
                 .request_document(doc_id);
             
             let doc_handle = repo_handle_result.await.unwrap();
-            let doc = doc_handle.with_doc(|d| d.clone());
-            
-            doc_state_map.add_doc(doc_id_clone, doc);
             doc_handle_map.add_handle(doc_handle);
         });
     }
@@ -1104,13 +1061,12 @@ impl GodotProject_rs {
             .with_doc_mut(|mut main_d| new_doc_handle.with_doc_mut(|d| d.merge(&mut main_d)));
 
         self.doc_handle_map.add_handle(new_doc_handle.clone());
-        self.doc_state_map.add_doc(new_doc_id.clone(), new_doc_handle.with_doc(|d| d.clone()));
 
         new_doc_id
     }
 
     fn get_doc(&self, id: DocumentId) -> Option<Automerge> {
-        self.doc_state_map.get_doc(&id.into())
+        self.doc_handle_map.get_doc(&id.into())
     }
 
     fn get_doc_handle(&self, id: DocumentId) -> Option<DocHandle> {
@@ -1236,25 +1192,25 @@ pub extern "C" fn godot_project_process(godot_project: *mut GodotProject_rs) {
 }
 
 #[no_mangle]
-pub extern "C" fn godot_project_save_file(    
-    godot_project: *const GodotProject_rs, 
-    path: *const std::os::raw::c_char, 
+pub extern "C" fn godot_project_save_file(
+    godot_project: *const GodotProject_rs,
+    path: *const std::os::raw::c_char,
     heads: *const std::os::raw::c_char, // todo: heads should be an vec of strings
-    content: *const std::os::raw::c_char, 
-    content_len: usize, 
+    content: *const std::os::raw::c_char,
+    content_len: usize,
     binary: bool
 ) {
     let godot_project = unsafe { &*godot_project };
     let path = unsafe { std::ffi::CStr::from_ptr(path) }
         .to_str()
         .unwrap()
-        .to_string();    
+        .to_string();
 
 
     let heads_str = unsafe { std::ffi::CStr::from_ptr(heads) }
     .to_str()
     .unwrap()
-    .to_string();    
+    .to_string();
 
     let heads: Option<Vec<ChangeHash>> = if heads_str.is_empty() {
         None
