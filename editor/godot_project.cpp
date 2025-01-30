@@ -265,9 +265,22 @@ Error GodotProject::save_file(const String &path, const Variant &content) {
 	// TODO: make godot_project_save_file return an error code
 	if (content.get_type() == Variant::STRING) {
 		auto content_str = content.operator String().utf8();
-		godot_project_save_file(fs, path.utf8().get_data(), content_str.get_data(), content_str.size(), false);
+		godot_project_save_file(fs, path.utf8().get_data(), "", content_str.get_data(), content_str.size(), false);
 	} else if (content.get_type() == Variant::PACKED_BYTE_ARRAY) {
-		godot_project_save_file(fs, path.utf8().get_data(), (const char *)content.operator PackedByteArray().ptr(), content.operator PackedByteArray().size(), true);
+		godot_project_save_file(fs, path.utf8().get_data(), "", (const char *)content.operator PackedByteArray().ptr(), content.operator PackedByteArray().size(), true);
+	} else {
+		ERR_FAIL_V_MSG(ERR_INVALID_PARAMETER, "Unsupported content type: " + String::num_int64(content.get_type()));
+	}
+	return OK;
+}
+
+Error GodotProject::save_file_at(const String &path, const String &heads, const Variant &content) {
+	// TODO: make godot_project_save_file return an error code
+	if (content.get_type() == Variant::STRING) {
+		auto content_str = content.operator String().utf8();
+		godot_project_save_file(fs, path.utf8().get_data(), heads.utf8().get_data(), content_str.get_data(), content_str.size(), false);
+	} else if (content.get_type() == Variant::PACKED_BYTE_ARRAY) {
+		godot_project_save_file(fs, path.utf8().get_data(), heads.utf8().get_data(), (const char *)content.operator PackedByteArray().ptr(), content.operator PackedByteArray().size(), true);
 	} else {
 		ERR_FAIL_V_MSG(ERR_INVALID_PARAMETER, "Unsupported content type: " + String::num_int64(content.get_type()));
 	}
@@ -477,6 +490,7 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("refresh"), &GodotProject::process);
 	ClassDB::bind_method(D_METHOD("stop"), &GodotProject::stop);
 	ClassDB::bind_method(D_METHOD("save_file", "path", "content"), &GodotProject::save_file);
+	ClassDB::bind_method(D_METHOD("save_file_at", "path", "heads", "content"), &GodotProject::save_file_at);
 	ClassDB::bind_method(D_METHOD("get_file", "path"), &GodotProject::get_file);
 	ClassDB::bind_method(D_METHOD("get_doc_id"), &GodotProject::get_doc_id);
 	ClassDB::bind_method(D_METHOD("get_branches"), &GodotProject::get_branches);
