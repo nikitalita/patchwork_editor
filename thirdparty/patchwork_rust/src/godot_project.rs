@@ -167,8 +167,7 @@ impl GodotProject_rs {
 
         let initial_state = block_on(init_godot_project_state(&repo_handle, doc_handle_map.clone(), DocumentId::from_str(&maybe_branches_metadata_doc_id).ok()));
 
-        let instance = GodotProject_rs {
-            // base,
+        GodotProject_rs {
             runtime,
             repo_handle,
             state: Arc::new(Mutex::new(initial_state)),
@@ -178,9 +177,7 @@ impl GodotProject_rs {
             signal_callback,
             iters_without_handled_doc_events: 0,
             initial_handled_doc_events: HashSet::new(),
-        };
-        
-        instance
+        }    
     }
 
     // PUBLIC API
