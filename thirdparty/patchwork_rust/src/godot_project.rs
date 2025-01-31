@@ -6,6 +6,7 @@ use std::{
         Arc, Mutex,
     },
 };
+use std::any::Any;
 use std::collections::HashSet;
 use std::env::var;
 use ::safer_ffi::prelude::*;
@@ -243,7 +244,7 @@ impl GodotProject_rs {
                 let linked_doc_handles: Vec<DocHandle> = {
                     // First collect all document requests from each branch
                     let doc_requests = branch_doc_handles.iter().flat_map(|branch_doc_handle| {
-                        branch_doc_handle.with_doc(|d| {
+                        branch_doc_handle.with_doc(|d: &Automerge| {
                             let files = match d.get_obj_id(ROOT, "files") {
                                 Some(files) => files,
                                 None => {
@@ -252,8 +253,9 @@ impl GodotProject_rs {
                                 }
                             };
 
+                            println!("linked_doc_handles: found {} files in branch {}", d.keys(&files).count(), branch_doc_handle.document_id());
                             // Collect all linked doc IDs from this branch
-                            d.keys(&files)
+                            let linked_doc_ids = d.keys(&files)
                                 .filter_map(|path| {
                                     let file = match d.get_obj_id(&files, &path) {
                                         Some(file) => file,
@@ -266,6 +268,15 @@ impl GodotProject_rs {
                                     let url = match d.get_string(&file, "url") {
                                         Some(url) => url,
                                         None => {
+                                            #[cfg(debug_assertions)]
+                                            {
+                                                // check if it has a content property, either a string or a byte array; if it does not, then print an error, as it SHOULD contain a url
+                                                let res = d.get(&file, "content");
+                                                res.unwrap_or_else(|_| {
+                                                    println!("Failed to load linked doc {:?}: no url or content property", path);
+                                                    None
+                                                });
+                                            }
                                             return None;
                                         }
                                     };
@@ -274,7 +285,10 @@ impl GodotProject_rs {
                                         (doc_id.clone(), repo_handle_clone.request_document(doc_id))
                                     })
                                 })
-                                .collect::<Vec<_>>()
+                                .collect::<Vec<_>>();
+                            println!("linked_doc_handles: found {} linked docs in branch {}", linked_doc_ids.len(), branch_doc_handle.document_id());
+                            linked_doc_ids
+                            
                         })
                     }).collect::<Vec<_>>();
 
@@ -500,7 +514,7 @@ impl GodotProject_rs {
 
 
         // does the file exist?
-        let file_entry = match doc.get(files, path) {
+        let file_entry = match doc.get(files, path.clone()) {
             Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
             _ => return None,
         };
@@ -531,7 +545,10 @@ impl GodotProject_rs {
             // read content doc
             let content_doc = match self.doc_handle_map.get_doc(&doc_id) {
                 Some(doc) => doc,
-                _ => return None
+                _ => {
+                    println!("ERROR: No doc for {} @ url {}", path, url);
+                    return None
+                }
             };
 
             // get content of binary file
@@ -665,12 +682,12 @@ impl GodotProject_rs {
                         // create content doc
                         let content_doc_id = self.create_doc(|d| {
                             let mut tx = d.transaction();
-                            let _ = tx.put(ROOT, "content", content.to_vec());
+                            let _ = tx.put(ROOT, "content", content);
                             tx.commit();
                         });
 
                         // write url to content doc into project doc
-                        let file_entry = tx.put_object(files, path, ObjType::Map);
+                        let file_entry = tx.put_object(files, &path, ObjType::Map);
                         let _ = tx.put(file_entry.unwrap(), "url", format!("automerge:{}", content_doc_id));
                     },
                 }
@@ -980,6 +997,23 @@ impl GodotProject_rs {
                     }
                     // Check if checked out doc changed
                     else if doc_id == checked_out_doc_id {
+                        // TODO: Paul, please implement actually getting the new linked docs
+                        // we have to get the linked docs from the checked out doc
+                        let d = self
+                            .doc_handle_map
+                            .get_doc(&checked_out_doc_id)
+                            .unwrap_or_else(|| panic!("Failed to get checked out doc"));
+                        let branch_doc_handle = self.get_doc_handle(checked_out_doc_id.clone()).unwrap();
+                        let files = match d.get_obj_id(ROOT, "files") {
+                            Some(files) => files,
+                            None => {
+                                println!("Failed to load files for checked out doc");
+                                return;
+                            }
+                        };
+
+                        println!("linked_doc_handles: found {} files in branch {}", d.keys(&files).count(), branch_doc_handle.document_id());
+                        // TODO: actually get the linked docs
                         (self.signal_callback)(self.signal_user_data, SIGNAL_FILES_CHANGED.as_ptr(), std::ptr::null(), 0);
 
                         // self.base_mut().emit_signal("files_changed", &[]);
