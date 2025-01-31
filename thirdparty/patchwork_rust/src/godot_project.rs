@@ -13,7 +13,7 @@ use ::safer_ffi::prelude::*;
 use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
 use autosurgeon::{bytes, hydrate, reconcile, Hydrate, Reconcile};
-use futures::{FutureExt, StreamExt};
+use futures::{executor::block_on, FutureExt, StreamExt};
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::os::raw::c_char;
@@ -178,8 +178,8 @@ impl GodotProject_rs {
             initial_handled_doc_events: HashSet::new(),
         };
 
-        instance.init(DocumentId::from_str(&maybe_branches_metadata_doc_id).ok());
-
+        block_on(instance.init(DocumentId::from_str(&maybe_branches_metadata_doc_id).ok()));
+        
         instance
     }
 
@@ -194,7 +194,7 @@ impl GodotProject_rs {
         }
     }
 
-    fn init(&self, maybe_branches_metadata_doc_id: Option<DocumentId>) {
+    async fn init(&self, maybe_branches_metadata_doc_id: Option<DocumentId>) {
         match maybe_branches_metadata_doc_id {
             None => {
                     // Create new project doc
@@ -245,12 +245,10 @@ impl GodotProject_rs {
                 
             },
             Some(branches_metadata_doc_id) => {
-
-            let repo_handle_clone = self.repo_handle.clone();
-            let state = self.state.clone();
-            let branches_metadata_doc_id_clone = branches_metadata_doc_id.clone();
+                let repo_handle_clone = self.repo_handle.clone();
+                let state = self.state.clone();
+                let branches_metadata_doc_id_clone = branches_metadata_doc_id.clone();
     
-            self.runtime.spawn(async move {
                 let repo_handle_result = repo_handle_clone
                     .request_document(branches_metadata_doc_id)
                     .await
@@ -347,9 +345,8 @@ impl GodotProject_rs {
                 *state = Some(GodotProjectState {
                     checked_out_doc_id: main_doc_id_clone,
                     branches_metadata_doc_id: branches_metadata_doc_id_clone,
-                });
-            });        
-        }
+                });                        
+            }
         }
     }
 
