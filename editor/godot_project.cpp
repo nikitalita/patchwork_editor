@@ -294,6 +294,9 @@ Variant GodotProject::get_file(const String &path) {
 	uint64_t length;
 	Variant variant;
 	auto buf_ptr = godot_project_get_file(fs, path.utf8().get_data(), &length, &is_binary);
+	if (buf_ptr == nullptr) {
+		return variant;
+	}
 	if (is_binary) {
 		auto arr = PackedByteArray();
 		arr.resize(length);
