@@ -22,6 +22,8 @@ void GodotProject::signal_callback(const String &signal, const Vector<String> &a
 		emit_signal(SNAME("checked_out_branch") /*, args[0]*/);
 	} else if (String(signal) == "branches_changed") {
 		emit_signal(SNAME("branches_changed"));
+	} else if (signal == "initialized") {
+		emit_signal(SNAME("initialized"));
 	} else {
 		ERR_FAIL_MSG("Unknown signal: " + String(signal));
 	}
@@ -513,5 +515,6 @@ void GodotProject::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("files_changed"));
 	ADD_SIGNAL(MethodInfo("branches_changed"));
 	ADD_SIGNAL(MethodInfo("checked_out_branch" /*,PropertyInfo(Variant::STRING, "branch_id")*/));
+	ADD_SIGNAL(MethodInfo("initialized"));
 	// ADD_SIGNAL(MethodInfo("started"));
 }

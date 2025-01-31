@@ -6,6 +6,8 @@ use std::{
         Arc, Mutex,
     },
 };
+use std::collections::HashSet;
+use std::env::var;
 use ::safer_ffi::prelude::*;
 
 use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, ROOT};
@@ -13,6 +15,7 @@ use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Rep
 use autosurgeon::{bytes, hydrate, reconcile, Hydrate, Reconcile};
 use futures::{FutureExt, StreamExt};
 use std::ffi::c_void;
+use std::ops::Deref;
 use std::os::raw::c_char;
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
@@ -77,6 +80,9 @@ pub struct GodotProject_rs {
     signal_user_data: *mut c_void,
     signal_callback: AutoMergeSignalCallback,
     sync_event_receiver: Receiver<SyncEvent>,
+    initialized: bool,
+    iters_without_handled_doc_events: u32,
+    initial_handled_doc_events: HashSet<DocumentId>,
 }
 
 const SERVER_URL: &str = "104.131.179.247:8080";
@@ -85,7 +91,7 @@ static SIGNAL_FILES_CHANGED: std::sync::LazyLock<std::ffi::CString> = std::sync:
 static SIGNAL_CHECKED_OUT_BRANCH: std::sync::LazyLock<std::ffi::CString> = std::sync::LazyLock::new(|| std::ffi::CString::new("checked_out_branch").unwrap());
 static SIGNAL_FILE_CHANGED: std::sync::LazyLock<std::ffi::CString> = std::sync::LazyLock::new(|| std::ffi::CString::new("file_changed").unwrap());
 static SIGNAL_STARTED: std::sync::LazyLock<std::ffi::CString> = std::sync::LazyLock::new(|| std::ffi::CString::new("started").unwrap());
-
+static SIGNAL_INITIALIZED: std::sync::LazyLock<std::ffi::CString> = std::sync::LazyLock::new(|| std::ffi::CString::new("initialized").unwrap());
 // convert a slice of strings to a slice of char * strings (e.g. *const std::os::raw::c_char)
 fn to_c_strs(strings: &[&str]) -> Vec<std::ffi::CString> {
     strings.iter().map(|s| std::ffi::CString::new(*s).unwrap()).collect()
@@ -336,6 +342,9 @@ impl GodotProject_rs {
             sync_event_receiver,
             signal_user_data,
             signal_callback,
+            initialized: false,
+            iters_without_handled_doc_events: 0,
+            initial_handled_doc_events: HashSet::new(),
         }/* );*/
     }
 
@@ -935,13 +944,17 @@ impl GodotProject_rs {
             Some(id) => id,
             None => return,
         };
+        let mut handled_sync_event = false;
 
         // Process all pending sync events
         while let Ok(event) = self.sync_event_receiver.try_recv() {
             match event {
                 SyncEvent::DocChanged { doc_id } => {
+                    handled_sync_event = true;
                     println!("doc changed event {:?} {:?}", doc_id, checked_out_doc_id);
-
+                    if !self.initialized {
+                        self.initial_handled_doc_events.insert(doc_id.clone());
+                    }
                     // Check if branches metadata doc changed
                     if doc_id == self.branches_metadata_doc_id {
 
@@ -972,6 +985,19 @@ impl GodotProject_rs {
                         // self.base_mut().emit_signal("files_changed", &[]);
                     }
                 }
+            }
+        }
+        // TODO: the iters without handled doc events is there because I'm not getting as sync event for all the doc handles that we actually have; this is a hack to prevent it from hanging
+        // Paul, do you know why this might be happening?
+        if !self.initialized {
+            if handled_sync_event {
+                self.iters_without_handled_doc_events = 0;
+            } else {
+                self.iters_without_handled_doc_events += 1;
+            }
+            if self.doc_handle_map.current_handles().len() == self.initial_handled_doc_events.len() || self.iters_without_handled_doc_events > 180 {
+                self.initialized = true;
+                (self.signal_callback)(self.signal_user_data, SIGNAL_INITIALIZED.as_ptr(), std::ptr::null(), 0)
             }
         }
     }
