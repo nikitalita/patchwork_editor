@@ -566,6 +566,7 @@ impl GodotProject_rs {
     // #[func]
     fn process(&mut self) {        
         let checked_out_doc_id = self.get_state().checked_out_doc_id;
+        let metadata_doc_id = self.get_state().branches_metadata_doc_id;
 
         // Process all pending sync events
         while let Ok(event) = self.sync_event_receiver.try_recv() {
@@ -573,7 +574,7 @@ impl GodotProject_rs {
                 SyncEvent::DocChanged { doc_id } => {
                     println!("doc changed event {:?} {:?}", doc_id, checked_out_doc_id);
                     // Check if branches metadata doc changed
-                    if doc_id == checked_out_doc_id {
+                    if doc_id == metadata_doc_id  {
                         let branches_metadata = self.get_branches_metadata_doc();
 
                         // load new branch docs in a separate task
