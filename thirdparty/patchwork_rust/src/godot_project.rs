@@ -68,19 +68,24 @@ pub enum StringOrPackedByteArray {
     PackedByteArray(Vec<u8>),
 }
 
+
+#[derive(Debug, Clone)]
+struct GodotProjectState {
+    checked_out_doc_id: DocumentId,
+    branches_metadata_doc_id: DocumentId,
+}
+
 // #[derive(GodotClass)]
 // #[class(no_init, base=Node)]
 pub struct GodotProject_rs {
     // base: Base<Node>,
     runtime: Runtime,
     repo_handle: RepoHandle,
-    branches_metadata_doc_id: DocumentId,
-    checked_out_doc_id: Arc<Mutex<Option<DocumentId>>>,
+    state: Arc<Mutex<Option<GodotProjectState>>>,
     doc_handle_map: DocHandleMap,
     signal_user_data: *mut c_void,
     signal_callback: AutoMergeSignalCallback,
     sync_event_receiver: Receiver<SyncEvent>,
-    initialized: bool,
     iters_without_handled_doc_events: u32,
     initial_handled_doc_events: HashSet<DocumentId>,
 }
@@ -146,65 +151,106 @@ impl GodotProject_rs {
         let (new_doc_tx, new_doc_rx) = futures::channel::mpsc::unbounded();
 
         let doc_handle_map = DocHandleMap::new(new_doc_tx.clone());
+       
+        let (sync_event_sender, sync_event_receiver) = std::sync::mpsc::channel();
 
-        let checked_out_doc_id = Arc::new(Mutex::new(None));
+        // Spawn connection task
+        Self::spawn_connection_task(&runtime, repo_handle.clone());
 
-        let branches_metadata_doc_id = if maybe_branches_metadata_doc_id.is_empty() {
-            // Create new project doc
-            let project_doc_handle = repo_handle.new_document();
-            project_doc_handle.with_doc_mut(|d| {
-                let mut tx = d.transaction();
-                let _ = reconcile(
-                    &mut tx,
-                    GodotProjectDoc {
-                        files: HashMap::new(),
-                        state: HashMap::new()
-                    },
-                );
-                tx.commit();
-            });
-            let project_doc_id = project_doc_handle.document_id();
+        // Spawn sync task for all doc handles
+        Self::spawn_sync_task(
+            &runtime,
+            new_doc_rx,
+            doc_handle_map.clone(),
+            sync_event_sender.clone(),
+        );    
 
-            // Create new branches metadata doc
-            let branches_metadata_doc_handle = repo_handle.new_document();
-            branches_metadata_doc_handle.with_doc_mut(|d| {
-                let mut tx = d.transaction();
-                let _ = reconcile(
-                    &mut tx,
-                    BranchesMetadataDoc {
-                        main_doc_id: project_doc_id.to_string(),
-                        branches: HashMap::new(),
-                    },
-                );
-                tx.commit();
-            });
+        let instance = GodotProject_rs {
+            // base,
+            runtime,
+            repo_handle,
+            state: Arc::new(Mutex::new(None)),
+            doc_handle_map,
+            sync_event_receiver,
+            signal_user_data,
+            signal_callback,
+            iters_without_handled_doc_events: 0,
+            initial_handled_doc_events: HashSet::new(),
+        };
 
-            let project_doc_id_clone = project_doc_id.clone();
-            let branches_metadata_doc_handle_clone = branches_metadata_doc_handle.clone();
+        instance.init(DocumentId::from_str(&maybe_branches_metadata_doc_id).ok());
 
-            // Add both docs to the states
-            {
-                doc_handle_map.add_handle(project_doc_handle.clone());
-                doc_handle_map.add_handle(branches_metadata_doc_handle.clone());
-            }
+        instance
+    }
 
-            {
-                let mut checked_out = checked_out_doc_id.lock().unwrap();
-                *checked_out = Some(project_doc_id_clone.clone());
-            }
+    // PUBLIC API
 
-            branches_metadata_doc_handle_clone.document_id()
-        } else {
-            let branches_metadata_doc_id =
-                DocumentId::from_str(&maybe_branches_metadata_doc_id).unwrap();
+    // #[func]
+    fn stop(&self) {
+        // todo: is this right?
+        unsafe {
+            let runtime = std::ptr::read(&self.runtime);
+            runtime.shutdown_background();
+        }
+    }
+
+    fn init(&self, maybe_branches_metadata_doc_id: Option<DocumentId>) {
+        match maybe_branches_metadata_doc_id {
+            None => {
+                    // Create new project doc
+                let project_doc_handle = self.repo_handle.new_document();
+                project_doc_handle.with_doc_mut(|d| {
+                    let mut tx = d.transaction();
+                    let _ = reconcile(
+                        &mut tx,
+                        GodotProjectDoc {
+                            files: HashMap::new(),
+                            state: HashMap::new()
+                        },
+                    );
+                    tx.commit();
+                });
+                let project_doc_id = project_doc_handle.document_id();
+
+                // Create new branches metadata doc
+                let branches_metadata_doc_handle = self.repo_handle.new_document();
+                branches_metadata_doc_handle.with_doc_mut(|d| {
+                    let mut tx = d.transaction();
+                    let _ = reconcile(
+                        &mut tx,
+                        BranchesMetadataDoc {
+                            main_doc_id: project_doc_id.to_string(),
+                            branches: HashMap::new(),
+                        },
+                    );
+                    tx.commit();
+                });
+
+                let project_doc_id_clone = project_doc_id.clone();
+                let branches_metadata_doc_handle_clone = branches_metadata_doc_handle.clone();
+
+                // Add both docs to the states
+                {
+                    self.doc_handle_map.add_handle(project_doc_handle.clone());
+                    self.doc_handle_map.add_handle(branches_metadata_doc_handle.clone());
+                }
+
+                {
+                    let mut state = self.state.lock().unwrap();
+                    *state = Some(GodotProjectState {
+                        checked_out_doc_id: project_doc_id_clone.clone(),
+                        branches_metadata_doc_id: branches_metadata_doc_handle_clone.document_id(),
+                    });
+                }
+                
+            },
+            Some(branches_metadata_doc_id) => {
+
+            let repo_handle_clone = self.repo_handle.clone();
+            let state = self.state.clone();
             let branches_metadata_doc_id_clone = branches_metadata_doc_id.clone();
-            let branches_metadata_doc_id_clone_2 = branches_metadata_doc_id.clone();
-
-            let repo_handle_clone = repo_handle.clone();
-            let doc_handle_map = doc_handle_map.clone();
-            let checked_out_doc_id = checked_out_doc_id.clone();
-
-            runtime.spawn(async move {
+    
+            self.runtime.spawn(async move {
                 let repo_handle_result = repo_handle_clone
                     .request_document(branches_metadata_doc_id)
                     .await
@@ -293,141 +339,68 @@ impl GodotProject_rs {
                     .await
                     .into_iter()
                     .filter_map(|x| x)
-                    .collect()
-                };
+                    .collect()                    
+                };        
 
-                // Add all doc handles to the map
-                {
-                    // Add branch docs
-                    for branch_doc_handle in branch_doc_handles {
-                        doc_handle_map.add_handle(branch_doc_handle);
-                    }
 
-                    // Add linked docs
-                    for linked_doc_handle in linked_doc_handles {
-                        doc_handle_map.add_handle(linked_doc_handle);
-                    }
-
-                    // Add branches metadata doc
-                    doc_handle_map.add_handle(repo_handle_result);
-                }
-
-                let mut checked_out = checked_out_doc_id.lock().unwrap();
-                *checked_out = Some(main_doc_id_clone);
-            });
-
-            branches_metadata_doc_id_clone_2
-        };
-
-        let (sync_event_sender, sync_event_receiver) = std::sync::mpsc::channel();
-
-        // Spawn connection task
-        Self::spawn_connection_task(&runtime, repo_handle.clone());
-
-        // Spawn sync task for all doc handles
-        Self::spawn_sync_task(
-            &runtime,
-            new_doc_rx,
-            doc_handle_map.clone(),
-            sync_event_sender.clone(),
-        );
-
-        /*return Gd::from_init_fn(|base| Self */ GodotProject_rs {
-            // base,
-            runtime,
-            repo_handle,
-            branches_metadata_doc_id,
-            checked_out_doc_id,
-            doc_handle_map,
-            sync_event_receiver,
-            signal_user_data,
-            signal_callback,
-            initialized: false,
-            iters_without_handled_doc_events: 0,
-            initial_handled_doc_events: HashSet::new(),
-        }/* );*/
+                let mut state = state.lock().unwrap();
+                *state = Some(GodotProjectState {
+                    checked_out_doc_id: main_doc_id_clone,
+                    branches_metadata_doc_id: branches_metadata_doc_id_clone,
+                });
+            });        
+        }
+        }
     }
 
-    // PUBLIC API
+    fn is_initialized(&self) -> bool {
+        self.state.lock().unwrap().is_some()
+    }
 
-    // #[func]
-    fn stop(&self) {
-        // todo: is this right?
-        unsafe {
-            let runtime = std::ptr::read(&self.runtime);
-            runtime.shutdown_background();
+    fn get_state(&self) -> GodotProjectState {    
+        match self.state.lock().unwrap().as_ref() {
+            Some(state) => state.clone(),
+            None => panic!("godot project is not initialized yet"),
+        }
+    }
+
+    fn get_branches_metadata_doc_handle(&self) -> DocHandle {    
+        match self.doc_handle_map.get_handle(&self.get_state().branches_metadata_doc_id) {
+            Some(doc_handle) => doc_handle,
+            None => panic!("project is not initialized properly, can't load branches metadata doc handle"),
+        }
+    }
+
+    fn get_branches_metadata_doc(&self) -> BranchesMetadataDoc {    
+        self.get_branches_metadata_doc_handle().with_doc(|d| hydrate(d).unwrap())
+    }
+
+    fn get_checked_out_doc_handle(&self) -> DocHandle {    
+        match self.doc_handle_map.get_handle(&self.get_state().checked_out_doc_id) {
+            Some(doc_handle) => doc_handle,
+            None => panic!("project is not initialized properly, can't load checked out doc"),
         }
     }
 
     // #[func]
-    fn get_doc_id(&self) -> String {
-        return self.branches_metadata_doc_id.to_string();
+    fn get_doc_id(&self) -> String {    
+        self.get_state().branches_metadata_doc_id.to_string()
     }
 
-    // #[func]
-    // fn get_heads(&self) -> Array<Variant> /* String[] */ {
-    //     let checked_out_doc_id = self.get_checked_out_doc_id();
 
-    //     let doc = self.doc_state_map.get_doc(&checked_out_doc_id).unwrap_or_else(|| {
-    //         panic!(
-    //             "Failed to get doc for checked out doc id: {}",
-    //             &checked_out_doc_id
-    //         )
-    //     });
-
-    //     let heads = doc.get_heads();
-
-    //     return heads
-    //         .to_vec()
-    //         .iter()
-    //         .map(|h| h.to_string().to_variant())
-    //         .collect::<Array<Variant>>();
-    // }
-    fn get_heads(&self) -> Vec<String> /* String[] */ {
-        let checked_out_doc_id = self.get_checked_out_doc_id();
-
-        let doc = self.doc_handle_map.get_doc(&checked_out_doc_id).unwrap_or_else(|| {
-            panic!(
-                "Failed to get doc for checked out doc id: {}",
-                &checked_out_doc_id
-            )
-        });
-
-        let heads = doc.get_heads();
-
-        return heads
+    fn get_heads(&self) -> Vec<String> /* String[] */ {    
+        self.get_checked_out_doc_handle().with_doc(|d| {        
+            d.get_heads()
             .to_vec()
             .iter()
             .map(|h| h.to_string())
-            .collect::<Vec<String>>();
+            .collect::<Vec<String>>()
+        })
     }
 
 
-    // // #[func]
-    // fn list_all_files(&self) -> Array<Variant> /* String[] */ {
-    //     let doc = self
-    //         .doc_state_map
-    //         .get_doc(&self.get_checked_out_doc_id())
-    //         .unwrap_or_else(|| panic!("Failed to get checked out doc"));
-
-    // let files = match doc.get_obj_id(ROOT, "files") {
-    // Some(files) => files,
-    // _ => {
-    // return array![];
-    // }
-    // };
-    // 
-    // 
-    // let keys = doc.keys(files).collect::<Vec<String>>();
-    // return keys.into_iter().map(|k| k.to_variant()).collect::<Array<Variant>>();
-    // }
-    // #[func]
-    fn list_all_files(&self) -> Vec<String> /* String[] */ {
-        let doc = self
-            .doc_handle_map
-            .get_doc(&self.get_checked_out_doc_id())
-            .unwrap_or_else(|| panic!("Failed to get checked out doc"));
-
+    fn list_all_files(&self) -> Vec<String> {
+        self.get_checked_out_doc_handle().with_doc(|doc| {
 
         let files = match doc.get_obj_id(ROOT, "files") {
             Some(files) => files,
@@ -436,75 +409,20 @@ impl GodotProject_rs {
             }
         };
         doc.keys(files).collect::<Vec<String>>()
+
+    })
     }
 
-    // #[func]
-    // fn get_file(&self, path: String) -> Variant /* String? */ {
-    //     let doc = self
-    //         .doc_state_map
-    //         .get_doc(&self.get_checked_out_doc_id())
-    //         .unwrap_or_else(|| panic!("Failed to get checked out doc"));
-
-
-    // does the file exist?
-    // let file_entry = match doc.get(files, path) {
-    // Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
-    // _ => return Variant::nil(),
-    // };
-    // 
-    // 
-    // // try to read file as text
-    // match doc.get(&file_entry, "content") {
-    // Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
-    // match doc.text(content) {
-    // Ok(text) => return text.to_variant(),
-    // Err(_) => {}
-    // }
-    // },
-    // _ => {}
-    // }
-    // 
-    // // ... otherwise try to read as linked binary doc
-    // 
-    // 
-    // if let Some(url) = doc.get_string(&file_entry, "url") {
-    // 
-    // // parse doc url
-    // let doc_id = match parse_automerge_url(&url) {
-    // Some(url) => url,
-    // _ => return Variant::nil()
-    // };
-    // 
-    // // read content doc
-    // let content_doc = match self.doc_state_map.get_doc(&doc_id) {
-    // Some(doc) => doc,
-    // _ => return Variant::nil()
-    // };
-    // 
-    // // get content of binary file
-    // if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
-    // return bytes.to_variant()
-    // };
-    // };
-    // 
-    // // finally give up
-    // return Variant::nil()
-    // }
     fn get_file(&self, path: String) -> Option<StringOrPackedByteArray> {
-        let doc = self
-            .doc_handle_map
-            .get_doc(&self.get_checked_out_doc_id())
-            .unwrap_or_else(|| panic!("Failed to get checked out doc"));
+        self.get_checked_out_doc_handle().with_doc(|doc| {
 
         let files = doc.get(ROOT, "files").unwrap().unwrap().1;
-
 
         // does the file exist?
         let file_entry = match doc.get(files, path) {
             Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
             _ => return None,
         };
-
 
         // try to read file as text
         match doc.get(&file_entry, "content") {
@@ -542,36 +460,13 @@ impl GodotProject_rs {
 
         // finally give up
         return None
+
+        })
     }
 
-
-    // // #[func]
-    // fn get_file_at(&self, path: String, heads: Array<Variant> /* String[] */) -> Variant /* String? */
-    // {
-    //     let doc = self
-    //         .doc_state_map
-    //         .get_doc(&self.get_checked_out_doc_id())
-    //         .unwrap_or_else(|| panic!("Failed to get checked out doc"));
-
-    //     let heads: Vec<ChangeHash> = heads
-    //         .iter_shared()
-    //         .map(|h| ChangeHash::from_str(h.to_string().as_str()).unwrap())
-    //         .collect();
-
-    //     let files = doc.get(ROOT, "files").unwrap().unwrap().1;
-
-    //     return match doc.get_at(files, path, &heads) {
-    //         Ok(Some((value, _))) => value.into_string().unwrap_or_default().to_variant(),
-    //         _ => Variant::nil(),
-    //     };
-    // }
-    // #[func]
     fn get_file_at(&self, path: String, heads: Vec<String> /* String[] */) -> Option<String> /* String? */
     {
-        let doc = self
-            .doc_handle_map
-            .get_doc(&self.get_checked_out_doc_id())
-            .unwrap_or_else(|| panic!("Failed to get checked out doc"));
+        self.get_checked_out_doc_handle().with_doc(|doc| {
 
         let heads: Vec<ChangeHash> = heads
             .iter()
@@ -583,43 +478,28 @@ impl GodotProject_rs {
         return match doc.get_at(files, path, &heads) {
             Ok(Some((value, _))) => Some(value.into_string().unwrap_or_default()),
             _ => None,
-        };
+        };  
+
+    })
     }
 
-    // #[func]
-    // fn get_changes(&self) -> Array<Variant> /* String[]  */ {
-    //     let doc = self
-    //         .doc_state_map
-    //         .get_doc(&self.get_checked_out_doc_id())
-    //         .unwrap_or_else(|| panic!("Failed to get checked out doc"));
 
-    //     doc.get_changes(&[])
-    //         .to_vec()
-    //         .iter()
-    //         .map(|c| c.hash().to_string().to_variant())
-    //         .collect::<Array<Variant>>()
-    // }
     fn get_changes(&self) -> Vec<String> /* String[]  */ {
-        let doc = self
-            .doc_handle_map
-            .get_doc(&self.get_checked_out_doc_id())
-            .unwrap_or_else(|| panic!("Failed to get checked out doc"));
+        self.get_checked_out_doc_handle().with_doc(|doc| {
+
 
         doc.get_changes(&[])
             .to_vec()
             .iter()
             .map(|c| c.hash().to_string())
             .collect::<Vec<String>>()
+    })
     }
 
     // #[func]
     fn save_file(&self, path: String, heads: Option<Vec<ChangeHash>>, content: StringOrPackedByteArray) {
-        let checked_out_doc_id = self.get_checked_out_doc_id();
-
-        let checked_out_doc_handle = self.get_doc_handle(checked_out_doc_id.clone());
-
-        if let Some(project_doc_handle) = checked_out_doc_handle {
-            project_doc_handle.with_doc_mut(|d| {
+        self.get_checked_out_doc_handle()
+        .with_doc_mut(|d| {
                 let mut tx = match heads {
                     Some(heads) => {
                         println!("change at heads {:?}", heads);
@@ -677,23 +557,19 @@ impl GodotProject_rs {
 
                 tx.commit();
             });
-        } else {
-            println!("too early {:?}", path)
-        }
+
+    
     }
 
     fn merge_branch(&self, branch_id: String) {
-        let branches_metadata_doc = self
-            .doc_handle_map
-            .get_doc(&self.branches_metadata_doc_id)
-            .unwrap();
-
+        let branches_metadata_doc_id = self.get_state().branches_metadata_doc_id;
+        let mut branches_metadata = self.get_branches_metadata_doc();
       
         // merge branch into main
 
         let branch_doc = self.doc_handle_map.get_handle(&DocumentId::from_str(&branch_id).unwrap()).unwrap();
 
-        let main_doc_id = DocumentId::from_str(&branches_metadata_doc.get_string(ROOT, "main_doc_id").unwrap()).unwrap();
+        let main_doc_id = DocumentId::from_str(branches_metadata.main_doc_id.as_str()).unwrap();
 
         branch_doc.with_doc_mut(|branch_doc| {
             self.update_doc(main_doc_id, |d| {
@@ -703,28 +579,19 @@ impl GodotProject_rs {
         
         // mark branch as merged
 
-        let mut branches_metadata: BranchesMetadataDoc = hydrate(&branches_metadata_doc)
-        .unwrap_or_else(|e| panic!("Failed to hydrate branches metadata doc: {}", e));
-
         let branch = branches_metadata.branches.get_mut(&branch_id).unwrap();
         branch.is_merged = true;
 
-        self.update_doc(self.branches_metadata_doc_id.clone(), |d| {
+        self.update_doc(branches_metadata_doc_id, |d| {
             let mut tx = d.transaction();
             reconcile(&mut tx, branches_metadata).unwrap();
             tx.commit();
         });
     }
 
-    // #[func]
-    fn create_branch(&self, name: String) -> String {
-        let branches_metadata_doc = self
-            .doc_handle_map
-            .get_doc(&self.branches_metadata_doc_id)
-            .unwrap_or_else(|| panic!("Failed to load branches metadata doc"));
 
-        let mut branches_metadata: BranchesMetadataDoc = hydrate(&branches_metadata_doc)
-            .unwrap_or_else(|e| panic!("Failed to hydrate branches metadata doc: {}", e));
+    fn create_branch(&self, name: String) -> String {
+        let mut branches_metadata = self.get_branches_metadata_doc();
 
         let main_doc_id = DocumentId::from_str(&branches_metadata.main_doc_id).unwrap();
         let new_doc_id = self.clone_doc(main_doc_id);
@@ -738,7 +605,7 @@ impl GodotProject_rs {
             },
         );
 
-        self.update_doc(self.branches_metadata_doc_id.clone(), |d| {
+        self.get_branches_metadata_doc_handle().with_doc_mut(|d| {
             let mut tx = d.transaction();
             reconcile(&mut tx, branches_metadata).unwrap();
             tx.commit();
@@ -747,25 +614,22 @@ impl GodotProject_rs {
         new_doc_id.to_string()
     }
 
-    // #[func]
     fn checkout_branch(&mut self, branch_id: String) {
+        let branches_metadata = self.get_branches_metadata_doc();
+
         let doc_id = if branch_id == "main" {
-            let branches_metadata_doc = self
-                .doc_handle_map
-                .get_doc(&self.branches_metadata_doc_id)
-                .unwrap_or_else(|| panic!("couldn't load branches metadata doc {}", branch_id));
-
-            let branches_metadata: BranchesMetadataDoc =
-                hydrate(&branches_metadata_doc).expect("failed to hydrate branches metadata doc");
-
             DocumentId::from_str(&branches_metadata.main_doc_id).unwrap()
         } else {
             DocumentId::from_str(&branch_id).unwrap()
         };
 
         {
-            let mut checked_out = self.checked_out_doc_id.lock().unwrap();
-            *checked_out = Some(doc_id);
+            let prev_state = self.get_state();
+            let mut state = self.state.lock().unwrap();
+            *state = Some(GodotProjectState {
+                checked_out_doc_id: doc_id,
+                branches_metadata_doc_id: prev_state.branches_metadata_doc_id,
+            });
         } // Release the lock before emitting signal
 
         // self.base_mut()
@@ -779,54 +643,8 @@ impl GodotProject_rs {
 
     }
 
-    // #[func]
-    // fn get_branches(&self) -> Array<Variant> /* { name: String, id: String }[] */ {
-    //     let maybe_branches_metadata_doc = self.get_doc(self.branches_metadata_doc_id.clone());
-
-    //     let branches_metadata_doc = match maybe_branches_metadata_doc {
-    //         Some(doc) => doc,
-    //         None => {
-    //             panic!("couldn't load branches_metadata_doc");
-    //         }
-    //     };
-
-    //     let branches_metadata: BranchesMetadataDoc = hydrate(&branches_metadata_doc).unwrap();
-
-    //     let mut branches = array![];
-
-    //     // Add main branch
-    //     branches.push(
-    //         &dict! {
-    //             "name": "main",
-    //             "id": "main"
-    //         }
-    //         .to_variant(),
-    //     );
-
-    //     // Add other branches
-    //     for (id, branch) in branches_metadata.branches {
-    //         branches.push(
-    //             &dict! {
-    //                 "name": branch.name,
-    //                 "id": id
-    //             }
-    //             .to_variant(),
-    //         );
-    //     }
-
-    //     branches
-    // }
     fn get_branches(&self) -> Vec<String> /* { name: String, id: String }[] */ {
-        let maybe_branches_metadata_doc = self.get_doc(self.branches_metadata_doc_id.clone());
-
-        let branches_metadata_doc = match maybe_branches_metadata_doc {
-            Some(doc) => doc,
-            None => {
-                panic!("couldn't load branches_metadata_doc");
-            }
-        };
-
-        let branches_metadata: BranchesMetadataDoc = hydrate(&branches_metadata_doc).unwrap();
+        let branches_metadata = self.get_branches_metadata_doc();
 
         let mut branches: Vec<String> = vec!("name".to_string(), "main".to_string(),  "id".to_string(), "main".to_string());
         
@@ -841,30 +659,14 @@ impl GodotProject_rs {
         branches
     }
 
-    // #[func]
     fn get_checked_out_branch_id(&self) -> String {
-        return self
-            .checked_out_doc_id
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap()
-            .to_string();
+        return self.get_state().checked_out_doc_id.to_string();
     }
 
     // State api
 
     fn set_state_int (&self, entity_id: String, prop: String, value: i64) {
-        let maybe_checked_out_doc_handle = self.doc_handle_map.get_handle(&self.checked_out_doc_id.lock().unwrap().clone().unwrap());
-
-        let checked_out_doc_handle = match maybe_checked_out_doc_handle {
-            Some(doc) => doc,
-            _ => {
-                println!("couldn't load checked out doc");
-                return
-            }   
-        };
-
+        let checked_out_doc_handle = self.get_checked_out_doc_handle();
         
         checked_out_doc_handle.with_doc_mut(|d| {
             let mut tx = d.transaction();
@@ -899,15 +701,7 @@ impl GodotProject_rs {
     }
 
     fn get_state_int (&self, entity_id: String, prop: String) -> Option<i64>  {
-        let maybe_checked_out_doc = self.doc_handle_map.get_doc(&self.checked_out_doc_id.lock().unwrap().clone().unwrap());
-
-        let checked_out_doc = match maybe_checked_out_doc {
-            Some(doc) => doc,
-            _ => {
-                println!("couldn't load checked out doc");
-                return None
-            }   
-        };
+        self.get_checked_out_doc_handle().with_doc(|checked_out_doc| {
 
        let state  = match checked_out_doc.get_obj_id(ROOT, "state") {
             Some(id) => id,
@@ -931,6 +725,8 @@ impl GodotProject_rs {
             None =>  None
         
         };
+
+    })
     }
 
     // these functions below should be extracted into a separate SyncRepo class
@@ -939,33 +735,21 @@ impl GodotProject_rs {
 
     // needs to be called every frame to process the internal events
     // #[func]
-    fn process(&mut self) {
-        let checked_out_doc_id = match self.checked_out_doc_id.lock().unwrap().clone() {
-            Some(id) => id,
-            None => return,
-        };
-        let mut handled_sync_event = false;
+    fn process(&mut self) {    
+        if !self.is_initialized() {
+            return;
+        }
+
+        let checked_out_doc_id = self.get_state().checked_out_doc_id;
 
         // Process all pending sync events
         while let Ok(event) = self.sync_event_receiver.try_recv() {
             match event {
                 SyncEvent::DocChanged { doc_id } => {
-                    handled_sync_event = true;
                     println!("doc changed event {:?} {:?}", doc_id, checked_out_doc_id);
-                    if !self.initialized {
-                        self.initial_handled_doc_events.insert(doc_id.clone());
-                    }
                     // Check if branches metadata doc changed
-                    if doc_id == self.branches_metadata_doc_id {
-
-                        // load branches metadata doc
-                        let doc = self
-                            .doc_handle_map
-                            .get_doc(&self.branches_metadata_doc_id)
-                            .unwrap_or_else(|| panic!("Failed to get branches metadata doc"));
-                        
-                        let branches_metadata: BranchesMetadataDoc = hydrate(&doc)
-                            .unwrap_or_else(|e| panic!("Failed to hydrate branches metadata doc: {:?}", e));
+                    if doc_id == checked_out_doc_id {
+                        let branches_metadata = self.get_branches_metadata_doc();
 
                         // check if it has new branches so we can load them
                         for (branch_doc_id, _) in branches_metadata.branches {
@@ -985,19 +769,6 @@ impl GodotProject_rs {
                         // self.base_mut().emit_signal("files_changed", &[]);
                     }
                 }
-            }
-        }
-        // TODO: the iters without handled doc events is there because I'm not getting as sync event for all the doc handles that we actually have; this is a hack to prevent it from hanging
-        // Paul, do you know why this might be happening?
-        if !self.initialized {
-            if handled_sync_event {
-                self.iters_without_handled_doc_events = 0;
-            } else {
-                self.iters_without_handled_doc_events += 1;
-            }
-            if self.doc_handle_map.current_handles().len() == self.initial_handled_doc_events.len() || self.iters_without_handled_doc_events > 180 {
-                self.initialized = true;
-                (self.signal_callback)(self.signal_user_data, SIGNAL_INITIALIZED.as_ptr(), std::ptr::null(), 0)
             }
         }
     }
@@ -1164,9 +935,6 @@ impl GodotProject_rs {
         self.doc_handle_map.get_handle(&id.into())
     }
 
-    fn get_checked_out_doc_id(&self) -> DocumentId {
-        return self.checked_out_doc_id.lock().unwrap().clone().unwrap();
-    }
 }
 
 fn handle_changes(handle: DocHandle) -> impl futures::Stream<Item = Vec<automerge::Patch>> + Send {
