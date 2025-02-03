@@ -443,33 +443,72 @@ impl GodotProject_rs {
         new_doc_id.to_string()
     }
 
+    // checkout branch in a separate thread
+    // ensures that all linked docs are loaded before checking out the branch
+    // todo: emit a signal when the branch is checked out
+    // 
+    // current workaround is to call get_checked_out_branch_id every frame and check if has changed in GDScript
+    
     fn checkout_branch(&mut self, branch_id: String) {
         let branches_metadata = self.get_branches_metadata_doc();
 
-        let doc_id = if branch_id == "main" {
+        let branch_doc_id = if branch_id == "main" {
             DocumentId::from_str(&branches_metadata.main_doc_id).unwrap()
         } else {
             DocumentId::from_str(&branch_id).unwrap()
         };
 
-        {
-            let prev_state = self.get_state();
-            let mut state = self.state.lock().unwrap();
-            *state = GodotProjectState {
-                checked_out_doc_id: doc_id,
-                branches_metadata_doc_id: prev_state.branches_metadata_doc_id,
+        let repo_handle = self.repo_handle.clone();
+        let doc_handle_map = self.doc_handle_map.clone();
+        let branch_doc_id_clone = branch_doc_id.clone();
+
+        let state_mutex = self.state.clone();
+
+        self.runtime.spawn(async move {
+            let branch_doc_handle = match repo_handle.request_document(branch_doc_id).await {
+                Ok(doc_handle) => {
+                    doc_handle_map.add_handle(doc_handle.clone());
+                    doc_handle
+                },
+                Err(e) => {
+                    println!("failed to load branch doc {:?} {:?}", branch_id, e);
+                    return;
+                }            
+            };
+
+            let linked_doc_requests = get_linked_docs_of_branch(&branch_doc_handle).into_iter().map(|doc_id| {
+                (doc_id.clone(), repo_handle.request_document(doc_id))
+            }).collect::<Vec<_>>();
+
+            let linked_doc_requests_len = linked_doc_requests.len();
+
+            let linked_doc_handles = futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
+                future.map(move |result| {
+                    match result {
+                        Ok(handle) => Some(handle),
+                        Err(e) => {
+                            println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
+                            None
+                        }
+                    }
+                })
+            })).await.into_iter().flatten().collect::<Vec<_>>();
+
+            if linked_doc_handles.len() != linked_doc_requests_len {
+                println!("Couldn't check out branch {:?} because some linked docs couldn't be loaded", branch_id);
+                return;
             }
-        } // Release the lock before emitting signal
 
-        // self.base_mut()
-        //     .emit_signal("checked_out_branch", &[branch_id.to_variant()]);
-        let slc = &[branch_id.as_str()];
-        let arg_cstrs = to_c_strs(slc);
-        let args = to_char_stars(&arg_cstrs);
+            // add all linked doc handles to the doc handle map
+            for doc_handle in linked_doc_handles {
+                doc_handle_map.add_handle(doc_handle.clone());
+            }
 
-        // @paul: passing args causes error so I'm not passing the checked out branch
-        (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), std::ptr::null(), 0);
-
+            {
+                let mut state =state_mutex.lock().unwrap();
+                state.checked_out_doc_id = branch_doc_id_clone;            
+            } // Release the lock before emitting signal
+        });
     }
 
     fn get_branches(&self) -> Vec<String> /* { name: String, id: String }[] */ {
@@ -574,23 +613,10 @@ impl GodotProject_rs {
                 SyncEvent::DocChanged { doc_id } => {
                     println!("doc changed event {:?} {:?}", doc_id, checked_out_doc_id);
                     // Check if branches metadata doc changed
-                    if doc_id == metadata_doc_id  {
-                        let branches_metadata = self.get_branches_metadata_doc();
-
-                        // load new branch docs in a separate task
-                        let branches_metadata_clone = branches_metadata.clone();
-                        let repo_handle_clone = self.repo_handle.clone();
-                        let doc_handle_map_clone = self.doc_handle_map.clone();
-
-                        self.runtime.spawn(async move {
-                            load_new_branch_docs(&branches_metadata_clone, &repo_handle_clone, &doc_handle_map_clone).await;
-                        });                       
-
+                    if doc_id == metadata_doc_id  {                
                         (self.signal_callback)(self.signal_user_data, BRANCHES_CHANGED.as_ptr(), std::ptr::null(), 0);
                     } else if doc_id == checked_out_doc_id {
                         (self.signal_callback)(self.signal_user_data, SIGNAL_FILES_CHANGED.as_ptr(), std::ptr::null(), 0);
-
-                        // self.base_mut().emit_signal("files_changed", &[]);
                     }
                 }
             }
@@ -714,20 +740,6 @@ impl GodotProject_rs {
         self.update_doc(doc_id.clone(), f);
 
         doc_id
-    }
-
-
-    fn request_doc(&self, doc_id: DocumentId) {
-        let repo_handle = self.repo_handle.clone();
-        let doc_handle_map = self.doc_handle_map.clone();
-
-        self.runtime.spawn(async move {
-            let repo_handle_result = repo_handle
-                .request_document(doc_id);
-            
-            let doc_handle = repo_handle_result.await.unwrap();
-            doc_handle_map.add_handle(doc_handle);
-        });
     }
 
     fn clone_doc(&self, doc_id: DocumentId) -> DocumentId {
