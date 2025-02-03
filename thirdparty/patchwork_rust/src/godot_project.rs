@@ -11,7 +11,7 @@ use ::safer_ffi::prelude::*;
 use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
 use autosurgeon::{bytes, hydrate, reconcile, Hydrate, Reconcile};
-use futures::{executor::block_on, FutureExt, StreamExt};
+use futures::{channel::mpsc::UnboundedSender, executor::block_on, FutureExt, StreamExt};
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::os::raw::c_char;
@@ -57,6 +57,7 @@ struct Branch {
 #[derive(Clone)]
 enum SyncEvent {
     DocChanged { doc_id: DocumentId },
+    CheckedOutBranch { doc_id: DocumentId },
 }
 
 
@@ -86,6 +87,7 @@ pub struct GodotProject_rs {
     sync_event_receiver: Receiver<SyncEvent>,
     iters_without_handled_doc_events: u32,
     initial_handled_doc_events: HashSet<DocumentId>,
+    checked_out_branch_tx: UnboundedSender<DocumentId>,
 }
 
 const SERVER_URL: &str = "104.131.179.247:8080";
@@ -148,6 +150,8 @@ impl GodotProject_rs {
 
         let (new_doc_tx, new_doc_rx) = futures::channel::mpsc::unbounded();
 
+        let (checked_out_branch_tx, checked_out_branch_rx) = futures::channel::mpsc::unbounded();
+
         let doc_handle_map = DocHandleMap::new(new_doc_tx.clone());
        
         let (sync_event_sender, sync_event_receiver) = std::sync::mpsc::channel();
@@ -159,8 +163,9 @@ impl GodotProject_rs {
         Self::spawn_sync_task(
             &runtime,
             new_doc_rx,
+            checked_out_branch_rx,
             doc_handle_map.clone(),
-            sync_event_sender.clone(),
+            sync_event_sender.clone(),                        
         );    
 
         let initial_state = block_on(init_godot_project_state(&repo_handle, doc_handle_map.clone(), DocumentId::from_str(&maybe_branches_metadata_doc_id).ok()));
@@ -173,8 +178,9 @@ impl GodotProject_rs {
             sync_event_receiver,
             signal_user_data,
             signal_callback,
-            iters_without_handled_doc_events: 0,
+            iters_without_handled_doc_events: 0,            
             initial_handled_doc_events: HashSet::new(),
+            checked_out_branch_tx,
         }    
     }
 
@@ -448,7 +454,7 @@ impl GodotProject_rs {
     // todo: emit a signal when the branch is checked out
     // 
     // current workaround is to call get_checked_out_branch_id every frame and check if has changed in GDScript
-    
+
     fn checkout_branch(&mut self, branch_id: String) {
         let branches_metadata = self.get_branches_metadata_doc();
 
@@ -458,57 +464,7 @@ impl GodotProject_rs {
             DocumentId::from_str(&branch_id).unwrap()
         };
 
-        let repo_handle = self.repo_handle.clone();
-        let doc_handle_map = self.doc_handle_map.clone();
-        let branch_doc_id_clone = branch_doc_id.clone();
-
-        let state_mutex = self.state.clone();
-
-        self.runtime.spawn(async move {
-            let branch_doc_handle = match repo_handle.request_document(branch_doc_id).await {
-                Ok(doc_handle) => {
-                    doc_handle_map.add_handle(doc_handle.clone());
-                    doc_handle
-                },
-                Err(e) => {
-                    println!("failed to load branch doc {:?} {:?}", branch_id, e);
-                    return;
-                }            
-            };
-
-            let linked_doc_requests = get_linked_docs_of_branch(&branch_doc_handle).into_iter().map(|doc_id| {
-                (doc_id.clone(), repo_handle.request_document(doc_id))
-            }).collect::<Vec<_>>();
-
-            let linked_doc_requests_len = linked_doc_requests.len();
-
-            let linked_doc_handles = futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
-                future.map(move |result| {
-                    match result {
-                        Ok(handle) => Some(handle),
-                        Err(e) => {
-                            println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
-                            None
-                        }
-                    }
-                })
-            })).await.into_iter().flatten().collect::<Vec<_>>();
-
-            if linked_doc_handles.len() != linked_doc_requests_len {
-                println!("Couldn't check out branch {:?} because some linked docs couldn't be loaded", branch_id);
-                return;
-            }
-
-            // add all linked doc handles to the doc handle map
-            for doc_handle in linked_doc_handles {
-                doc_handle_map.add_handle(doc_handle.clone());
-            }
-
-            {
-                let mut state =state_mutex.lock().unwrap();
-                state.checked_out_doc_id = branch_doc_id_clone;            
-            } // Release the lock before emitting signal
-        });
+        self.checked_out_branch_tx.unbounded_send(branch_doc_id);
     }
 
     fn get_branches(&self) -> Vec<String> /* { name: String, id: String }[] */ {
@@ -619,6 +575,9 @@ impl GodotProject_rs {
                         (self.signal_callback)(self.signal_user_data, SIGNAL_FILES_CHANGED.as_ptr(), std::ptr::null(), 0);
                     }
                 }
+
+                // todo: pass doc_id to signal
+                SyncEvent::CheckedOutBranch { doc_id } =>  (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), std::ptr::null(), 0),
             }
         }
     }
@@ -653,14 +612,18 @@ impl GodotProject_rs {
         });
     }
 
-    fn spawn_sync_task(
+    fn spawn_sync_task(        
+        repo_handle: RepoHandle,
         runtime: &Runtime,
         mut new_docs: futures::channel::mpsc::UnboundedReceiver<DocHandle>,
+        mut checked_out_branch: futures::channel::mpsc::UnboundedReceiver<DocumentId>,
         doc_handle_map: DocHandleMap,
         sync_event_sender: Sender<SyncEvent>,
     ) {
         let initial_handles = doc_handle_map
             .current_handles();
+
+
 
         runtime.spawn(async move {
             // This is a stream of SyncEvent
@@ -684,6 +647,7 @@ impl GodotProject_rs {
 
                 all_doc_changes.push(change_stream.boxed());
             }
+
 
             // Now, drive the SelectAll and also wait for any new documents to  arrive and add
             // them to the selectall
@@ -711,6 +675,53 @@ impl GodotProject_rs {
                         });
 
                         all_doc_changes.push(change_stream.boxed());
+                    }
+
+                    checked_out_branch_id = checked_out_branch.select_next_some() => {
+                        
+                        let doc_id = checked_out_branch_id.clone();
+                        let doc_handle = doc_handle_map.get_handle(&doc_id).unwrap();
+            
+                        let branch_doc_handle = match repo_handle.request_document(checked_out_branch_id).await {
+                            Ok(doc_handle) => {
+                                doc_handle_map.add_handle(doc_handle.clone());
+                                doc_handle
+                            },
+                            Err(e) => {
+                                println!("failed to load branch doc {:?} {:?}", checked_out_branch_id, e);
+                                return;
+                            }            
+                        };
+            
+                        let linked_doc_requests = get_linked_docs_of_branch(&branch_doc_handle).into_iter().map(|doc_id| {
+                            (doc_id.clone(), repo_handle.request_document(doc_id))
+                        }).collect::<Vec<_>>();
+            
+                        let linked_doc_requests_len = linked_doc_requests.len();
+            
+                        let linked_doc_handles = futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
+                            future.map(move |result| {
+                                match result {
+                                    Ok(handle) => Some(handle),
+                                    Err(e) => {
+                                        println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
+                                        None
+                                    }
+                                }
+                            })
+                        })).await.into_iter().flatten().collect::<Vec<_>>();
+            
+                        if linked_doc_handles.len() != linked_doc_requests_len {
+                            println!("Couldn't check out branch {:?} because some linked docs couldn't be loaded", checked_out_branch_id);
+                            return;
+                        }
+            
+                        // add all linked doc handles to the doc handle map
+                        for doc_handle in linked_doc_handles {
+                            doc_handle_map.add_handle(doc_handle.clone());
+                        }
+
+                        sync_event_sender.send(SyncEvent::CheckedOutBranch { doc_id: checked_out_branch_id.clone() }).unwrap();
                     }
                 }
             }
