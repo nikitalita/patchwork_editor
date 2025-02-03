@@ -121,12 +121,6 @@ endif()
 
 set(CARGO_BINARY_DIR "${CARGO_TARGET_DIR}/${CARGO_TARGET}/${CARGO_BUILD_TYPE}")
 
-configure_file(
-        ${PROJECT_SOURCE_DIR}/cmake/Cargo.toml.in
-        ${PROJECT_SOURCE_DIR}/Cargo.toml
-        NEWLINE_STYLE LF
-)
-
 set(INCLUDE_GUARD_PREFIX "${SYMBOL_PREFIX}")
 
 # set the macos version to 11.0 if we are on apple
@@ -169,7 +163,6 @@ add_custom_command(
         src/godot_project.rs
         src/doc_handle_map.rs
         ${PROJECT_SOURCE_DIR}/build.rs
-        ${PROJECT_SOURCE_DIR}/cmake/Cargo.toml.in
         WORKING_DIRECTORY
         ${PROJECT_SOURCE_DIR}
         COMMENT
