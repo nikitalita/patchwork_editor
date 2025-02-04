@@ -48,7 +48,7 @@ struct BranchesMetadataDoc {
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
-struct Branch {
+pub struct Branch {
     name: String,
     id: String,
     is_merged: bool
