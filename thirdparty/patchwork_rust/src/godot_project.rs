@@ -251,54 +251,57 @@ impl GodotProject_rs {
     }
 
     fn get_file(&self, path: String) -> Option<StringOrPackedByteArray> {
-        self.get_checked_out_doc_handle().with_doc(|doc| {
+        let mut content_doc_id_result: Option<DocumentId> = None;
+        let result = self.get_checked_out_doc_handle().with_doc(|doc| {
+            let files = doc.get(ROOT, "files").unwrap().unwrap().1;
+            // does the file exist?
+            let file_entry = match doc.get(files, path) {
+                Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
+                _ => return None,
+            };
 
-        let files = doc.get(ROOT, "files").unwrap().unwrap().1;
+            // try to read file as text
+            match doc.get(&file_entry, "content") {
+                Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
+                    match doc.text(content) {
+                        Ok(text) => return Some(StringOrPackedByteArray::String(text.to_string())),
+                        Err(_) => {}
+                    }
+                },
+                _ => {}
+            }
 
-        // does the file exist?
-        let file_entry = match doc.get(files, path) {
-            Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
-            _ => return None,
-        };
+            // ... otherwise try to read as linked binary doc
 
-        // try to read file as text
-        match doc.get(&file_entry, "content") {
-            Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
-                match doc.text(content) {
-                    Ok(text) => return Some(StringOrPackedByteArray::String(text.to_string())),
-                    Err(_) => {}
-                }
-            },
-            _ => {}
+
+            if let Some(url) = doc.get_string(&file_entry, "url") {
+
+                // parse doc url
+                let doc_id = match parse_automerge_url(&url) {
+                    Some(url) => url,
+                    _ => return None
+                };
+                content_doc_id_result = Some(doc_id);
+            };
+
+            None
+        });
+        if result.is_none() {
+            if let Some(content_doc_id) = content_doc_id_result {
+                // // read content doc
+                let content_doc = match self.doc_handle_map.get_doc(&content_doc_id) {
+                    Some(doc) => doc,
+                    _ => return None
+                };
+
+                // get content of binary file
+                if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
+                    return Some(StringOrPackedByteArray::PackedByteArray(bytes));
+                };
+            }
         }
 
-        // ... otherwise try to read as linked binary doc
-
-
-        if let Some(url) = doc.get_string(&file_entry, "url") {
-
-            // parse doc url
-            let doc_id = match parse_automerge_url(&url) {
-                Some(url) => url,
-                _ => return None
-            };
-
-            // read content doc
-            let content_doc = match self.doc_handle_map.get_doc(&doc_id) {
-                Some(doc) => doc,
-                _ => return None
-            };
-
-            // get content of binary file
-            if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
-                return Some(StringOrPackedByteArray::PackedByteArray(bytes));
-            };
-        };
-
-        // finally give up
-        return None
-
-        })
+        result
     }
 
     fn get_file_at(&self, path: String, heads: Vec<String> /* String[] */) -> Option<String> /* String? */
