@@ -56,8 +56,9 @@ struct Branch {
 
 #[derive(Clone)]
 enum SyncEvent {
+    NewDoc { doc_id: DocumentId, doc_handle: DocHandle },
     DocChanged { doc_id: DocumentId },
-    CheckedOutBranch { doc_id: DocumentId },
+    CheckedOutBranch { doc_id: DocumentId, linked_doc_handles: Vec<DocHandle> },
 }
 
 
@@ -158,10 +159,11 @@ impl GodotProject_rs {
 
         // Spawn connection task
         Self::spawn_connection_task(&runtime, repo_handle.clone());
-
+        let repo_handle_clone = repo_handle.clone();
         // Spawn sync task for all doc handles
         Self::spawn_sync_task(
             &runtime,
+            repo_handle_clone,
             new_doc_rx,
             checked_out_branch_rx,
             doc_handle_map.clone(),
@@ -484,7 +486,8 @@ impl GodotProject_rs {
     }
 
     fn get_checked_out_branch_id(&self) -> String {
-        return self.get_state().checked_out_doc_id.to_string();
+        let checked_out = self.get_state().checked_out_doc_id.to_string();
+        return checked_out;
     }
 
     // State api
@@ -559,13 +562,15 @@ impl GodotProject_rs {
 
     // needs to be called every frame to process the internal events
     // #[func]
-    fn process(&mut self) {        
-        let checked_out_doc_id = self.get_state().checked_out_doc_id;
+    fn process(&mut self) {
+        let mut checked_out_doc_id = self.get_state().checked_out_doc_id;
         let metadata_doc_id = self.get_state().branches_metadata_doc_id;
 
         // Process all pending sync events
         while let Ok(event) = self.sync_event_receiver.try_recv() {
             match event {
+                // this is internal, we don't pass this back to process
+                SyncEvent::NewDoc { doc_id: _doc_id, doc_handle: _doc_handle } => {}
                 SyncEvent::DocChanged { doc_id } => {
                     println!("doc changed event {:?} {:?}", doc_id, checked_out_doc_id);
                     // Check if branches metadata doc changed
@@ -576,8 +581,23 @@ impl GodotProject_rs {
                     }
                 }
 
-                // todo: pass doc_id to signal
-                SyncEvent::CheckedOutBranch { doc_id } =>  (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), std::ptr::null(), 0),
+                SyncEvent::CheckedOutBranch { doc_id, linked_doc_handles } => {
+                    {
+                        let prev_state = self.get_state();
+                        let mut state = self.state.lock().unwrap();
+                        *state = GodotProjectState {
+                            checked_out_doc_id: doc_id.clone(),
+                            branches_metadata_doc_id: prev_state.branches_metadata_doc_id,
+                        }
+                    } // Release the lock before emitting signal
+                    checked_out_doc_id = doc_id.clone();
+                    // add all linked doc handles to the doc handle map
+                    for doc_handle in linked_doc_handles {
+                        self.doc_handle_map.add_handle(doc_handle.clone());
+                    }
+                    let doc_id_c_str = std::ffi::CString::new(format!("{}", doc_id)).unwrap();
+                    (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), &doc_id_c_str.as_ptr(), 1);
+                }
             }
         }
     }
@@ -612,13 +632,14 @@ impl GodotProject_rs {
         });
     }
 
-    fn spawn_sync_task(        
-        repo_handle: RepoHandle,
+    fn spawn_sync_task(
         runtime: &Runtime,
+        repo_handle: RepoHandle,
         mut new_docs: futures::channel::mpsc::UnboundedReceiver<DocHandle>,
         mut checked_out_branch: futures::channel::mpsc::UnboundedReceiver<DocumentId>,
         doc_handle_map: DocHandleMap,
         sync_event_sender: Sender<SyncEvent>,
+        // state_getter: impl Fn() -> GodotProjectState + Clone + Send + Sync + 'static,
     ) {
         let initial_handles = doc_handle_map
             .current_handles();
@@ -647,7 +668,6 @@ impl GodotProject_rs {
 
                 all_doc_changes.push(change_stream.boxed());
             }
-
 
             // Now, drive the SelectAll and also wait for any new documents to  arrive and add
             // them to the selectall
@@ -680,9 +700,8 @@ impl GodotProject_rs {
                     checked_out_branch_id = checked_out_branch.select_next_some() => {
                         
                         let doc_id = checked_out_branch_id.clone();
-                        let doc_handle = doc_handle_map.get_handle(&doc_id).unwrap();
             
-                        let branch_doc_handle = match repo_handle.request_document(checked_out_branch_id).await {
+                        let branch_doc_handle = match repo_handle.request_document(checked_out_branch_id.clone()).await {
                             Ok(doc_handle) => {
                                 doc_handle_map.add_handle(doc_handle.clone());
                                 doc_handle
@@ -715,13 +734,12 @@ impl GodotProject_rs {
                             println!("Couldn't check out branch {:?} because some linked docs couldn't be loaded", checked_out_branch_id);
                             return;
                         }
-            
-                        // add all linked doc handles to the doc handle map
-                        for doc_handle in linked_doc_handles {
-                            doc_handle_map.add_handle(doc_handle.clone());
-                        }
+                        
+                        // for doc_handle in &linked_doc_handles {
+                        //     doc_handle_map.add_handle(doc_handle.clone());
+                        // }
 
-                        sync_event_sender.send(SyncEvent::CheckedOutBranch { doc_id: checked_out_branch_id.clone() }).unwrap();
+                        sync_event_sender.send(SyncEvent::CheckedOutBranch { doc_id: checked_out_branch_id.clone(), linked_doc_handles: linked_doc_handles }).unwrap();
                     }
                 }
             }
