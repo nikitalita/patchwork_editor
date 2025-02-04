@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::env::var;
 use ::safer_ffi::prelude::*;
 
-use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, ROOT};
+use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, TextEncoding, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
 use autosurgeon::{bytes, hydrate, reconcile, Hydrate, Reconcile};
 use futures::{channel::mpsc::UnboundedSender, executor::block_on, FutureExt, StreamExt};
@@ -341,7 +341,7 @@ impl GodotProject_rs {
                     Some(heads) => {
                         println!("change at heads {:?}", heads);
 
-                        d.transaction_at(PatchLog::inactive(TextRepresentation::String), &heads)
+                        d.transaction_at(PatchLog::inactive(TextRepresentation::String(TextEncoding::Utf8CodeUnit)), &heads)
                     },
                     None => {
                         println!("don't have heads");
@@ -811,7 +811,7 @@ fn handle_changes(handle: DocHandle) -> impl futures::Stream<Item = Vec<automerg
             d.diff(
                 &heads_before,
                 &heads_after,
-                automerge::patches::TextRepresentation::String,
+                automerge::patches::TextRepresentation::String(TextEncoding::Utf8CodeUnit),
             )
         });
 
