@@ -1008,15 +1008,6 @@ fn get_linked_docs_of_branch(branch_doc_handle: &DocHandle) -> Vec<DocumentId> {
 // C FFI functions for GodotProject
 
 #[no_mangle]
-pub extern "C" fn godot_project_get_branch_doc_id(godot_project: *const GodotProject_rs) -> *const std::os::raw::c_char {
-    let godot_project = unsafe { &*godot_project };
-    let branch_doc_id = godot_project.get_checked_out_branch_id();
-    let c_string = std::ffi::CString::new(branch_doc_id).unwrap();
-    c_string.into_raw()
-}
-
-
-#[no_mangle]
 pub extern "C" fn godot_project_get_fs_doc_id(godot_project: *const GodotProject_rs) -> *const std::os::raw::c_char { 
     let godot_project = unsafe { &*godot_project };
     let fs_doc_id = godot_project.get_doc_id();

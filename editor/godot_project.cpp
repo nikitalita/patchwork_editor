@@ -320,13 +320,6 @@ String GodotProject::get_doc_id() const {
 	return strid;
 }
 
-String GodotProject::get_branch_doc_id() const {
-	auto id = godot_project_get_branch_doc_id(fs);
-	auto strid = String::utf8(id);
-	godot_project_free_string(id);
-	return strid;
-}
-
 TypedArray<Dictionary> GodotProject::get_branches() {
 	TypedArray<Dictionary> branches;
 	uint64_t len;
@@ -506,7 +499,6 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_heads"), &GodotProject::get_heads);
 	ClassDB::bind_method(D_METHOD("get_changes"), &GodotProject::get_changes);
 	ClassDB::bind_method(D_METHOD("process"), &GodotProject::process);
-	ClassDB::bind_method(D_METHOD("get_branch_doc_id"), &GodotProject::get_branch_doc_id);
 	ClassDB::bind_method(D_METHOD("get_state_int", "entity_id", "prop"), &GodotProject::get_state_int);
 	ClassDB::bind_method(D_METHOD("set_state_int", "entity_id", "prop", "value"), &GodotProject::set_state_int);
 	//unsaved_files_open()
