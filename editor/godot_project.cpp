@@ -7,19 +7,18 @@
 
 void GodotProject::_signal_callback(void *signal_user_data, const char *signal, const char *const *p_args, size_t p_args_len) {
 	Vector<String> args;
-	ERR_FAIL_COND_MSG(p_args_len % 2 != 0, "Expected an even number of arguments");
 	for (size_t i = 0; i < p_args_len; i++) {
-		args.push_back(p_args[i]);
+		args.push_back(String::utf8(p_args[i]));
 	}
 	auto self = static_cast<GodotProject *>(signal_user_data);
-	self->signal_callback(signal, args);
+	self->signal_callback(String::utf8(signal), args);
 }
 
 void GodotProject::signal_callback(const String &signal, const Vector<String> &args) {
 	if (String(signal) == "files_changed") {
 		emit_signal(SNAME("files_changed"));
 	} else if (String(signal) == "checked_out_branch") {
-		emit_signal(SNAME("checked_out_branch") /*, args[0]*/);
+		emit_signal(SNAME("checked_out_branch"), args[0]);
 	} else if (String(signal) == "branches_changed") {
 		emit_signal(SNAME("branches_changed"));
 	} else if (signal == "initialized") {
@@ -321,13 +320,6 @@ String GodotProject::get_doc_id() const {
 	return strid;
 }
 
-String GodotProject::get_branch_doc_id() const {
-	auto id = godot_project_get_branch_doc_id(fs);
-	auto strid = String::utf8(id);
-	godot_project_free_string(id);
-	return strid;
-}
-
 TypedArray<Dictionary> GodotProject::get_branches() {
 	TypedArray<Dictionary> branches;
 	uint64_t len;
@@ -507,7 +499,6 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_heads"), &GodotProject::get_heads);
 	ClassDB::bind_method(D_METHOD("get_changes"), &GodotProject::get_changes);
 	ClassDB::bind_method(D_METHOD("process"), &GodotProject::process);
-	ClassDB::bind_method(D_METHOD("get_branch_doc_id"), &GodotProject::get_branch_doc_id);
 	ClassDB::bind_method(D_METHOD("get_state_int", "entity_id", "prop"), &GodotProject::get_state_int);
 	ClassDB::bind_method(D_METHOD("set_state_int", "entity_id", "prop", "value"), &GodotProject::set_state_int);
 	//unsaved_files_open()
@@ -517,7 +508,7 @@ void GodotProject::_bind_methods() {
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_recursive_dir_list", "dir", "wildcards", "absolute", "rel"), &GodotProject::get_recursive_dir_list, DEFVAL(Vector<String>()), DEFVAL(true), DEFVAL(""));
 	ADD_SIGNAL(MethodInfo("files_changed"));
 	ADD_SIGNAL(MethodInfo("branches_changed"));
-	ADD_SIGNAL(MethodInfo("checked_out_branch" /*,PropertyInfo(Variant::STRING, "branch_id")*/));
+	ADD_SIGNAL(MethodInfo("checked_out_branch", PropertyInfo(Variant::STRING, "branch_id")));
 	ADD_SIGNAL(MethodInfo("initialized"));
 	// ADD_SIGNAL(MethodInfo("started"));
 }

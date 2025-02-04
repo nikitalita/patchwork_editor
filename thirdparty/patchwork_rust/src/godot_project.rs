@@ -8,10 +8,10 @@ use std::collections::HashSet;
 use std::env::var;
 use ::safer_ffi::prelude::*;
 
-use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, ROOT};
+use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, TextEncoding, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
 use autosurgeon::{bytes, hydrate, reconcile, Hydrate, Reconcile};
-use futures::{executor::block_on, FutureExt, StreamExt};
+use futures::{channel::mpsc::UnboundedSender, executor::block_on, FutureExt, StreamExt};
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::os::raw::c_char;
@@ -56,7 +56,9 @@ struct Branch {
 
 #[derive(Clone)]
 enum SyncEvent {
+    NewDoc { doc_id: DocumentId, doc_handle: DocHandle },
     DocChanged { doc_id: DocumentId },
+    CheckedOutBranch { doc_id: DocumentId, linked_doc_handles: Vec<DocHandle> },
 }
 
 
@@ -86,6 +88,7 @@ pub struct GodotProject_rs {
     sync_event_receiver: Receiver<SyncEvent>,
     iters_without_handled_doc_events: u32,
     initial_handled_doc_events: HashSet<DocumentId>,
+    checked_out_branch_tx: UnboundedSender<DocumentId>,
 }
 
 const SERVER_URL: &str = "104.131.179.247:8080";
@@ -148,19 +151,23 @@ impl GodotProject_rs {
 
         let (new_doc_tx, new_doc_rx) = futures::channel::mpsc::unbounded();
 
+        let (checked_out_branch_tx, checked_out_branch_rx) = futures::channel::mpsc::unbounded();
+
         let doc_handle_map = DocHandleMap::new(new_doc_tx.clone());
        
         let (sync_event_sender, sync_event_receiver) = std::sync::mpsc::channel();
 
         // Spawn connection task
         Self::spawn_connection_task(&runtime, repo_handle.clone());
-
+        let repo_handle_clone = repo_handle.clone();
         // Spawn sync task for all doc handles
         Self::spawn_sync_task(
             &runtime,
+            repo_handle_clone,
             new_doc_rx,
+            checked_out_branch_rx,
             doc_handle_map.clone(),
-            sync_event_sender.clone(),
+            sync_event_sender.clone(),                        
         );    
 
         let initial_state = block_on(init_godot_project_state(&repo_handle, doc_handle_map.clone(), DocumentId::from_str(&maybe_branches_metadata_doc_id).ok()));
@@ -173,8 +180,9 @@ impl GodotProject_rs {
             sync_event_receiver,
             signal_user_data,
             signal_callback,
-            iters_without_handled_doc_events: 0,
+            iters_without_handled_doc_events: 0,            
             initial_handled_doc_events: HashSet::new(),
+            checked_out_branch_tx,
         }    
     }
 
@@ -243,54 +251,57 @@ impl GodotProject_rs {
     }
 
     fn get_file(&self, path: String) -> Option<StringOrPackedByteArray> {
-        self.get_checked_out_doc_handle().with_doc(|doc| {
+        let mut content_doc_id_result: Option<DocumentId> = None;
+        let result = self.get_checked_out_doc_handle().with_doc(|doc| {
+            let files = doc.get(ROOT, "files").unwrap().unwrap().1;
+            // does the file exist?
+            let file_entry = match doc.get(files, path) {
+                Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
+                _ => return None,
+            };
 
-        let files = doc.get(ROOT, "files").unwrap().unwrap().1;
+            // try to read file as text
+            match doc.get(&file_entry, "content") {
+                Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
+                    match doc.text(content) {
+                        Ok(text) => return Some(StringOrPackedByteArray::String(text.to_string())),
+                        Err(_) => {}
+                    }
+                },
+                _ => {}
+            }
 
-        // does the file exist?
-        let file_entry = match doc.get(files, path) {
-            Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
-            _ => return None,
-        };
+            // ... otherwise try to read as linked binary doc
 
-        // try to read file as text
-        match doc.get(&file_entry, "content") {
-            Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
-                match doc.text(content) {
-                    Ok(text) => return Some(StringOrPackedByteArray::String(text.to_string())),
-                    Err(_) => {}
-                }
-            },
-            _ => {}
+
+            if let Some(url) = doc.get_string(&file_entry, "url") {
+
+                // parse doc url
+                let doc_id = match parse_automerge_url(&url) {
+                    Some(url) => url,
+                    _ => return None
+                };
+                content_doc_id_result = Some(doc_id);
+            };
+
+            None
+        });
+        if result.is_none() {
+            if let Some(content_doc_id) = content_doc_id_result {
+                // // read content doc
+                let content_doc = match self.doc_handle_map.get_doc(&content_doc_id) {
+                    Some(doc) => doc,
+                    _ => return None
+                };
+
+                // get content of binary file
+                if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
+                    return Some(StringOrPackedByteArray::PackedByteArray(bytes));
+                };
+            }
         }
 
-        // ... otherwise try to read as linked binary doc
-
-
-        if let Some(url) = doc.get_string(&file_entry, "url") {
-
-            // parse doc url
-            let doc_id = match parse_automerge_url(&url) {
-                Some(url) => url,
-                _ => return None
-            };
-
-            // read content doc
-            let content_doc = match self.doc_handle_map.get_doc(&doc_id) {
-                Some(doc) => doc,
-                _ => return None
-            };
-
-            // get content of binary file
-            if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
-                return Some(StringOrPackedByteArray::PackedByteArray(bytes));
-            };
-        };
-
-        // finally give up
-        return None
-
-        })
+        result
     }
 
     fn get_file_at(&self, path: String, heads: Vec<String> /* String[] */) -> Option<String> /* String? */
@@ -333,7 +344,7 @@ impl GodotProject_rs {
                     Some(heads) => {
                         println!("change at heads {:?}", heads);
 
-                        d.transaction_at(PatchLog::inactive(TextRepresentation::String), &heads)
+                        d.transaction_at(PatchLog::inactive(TextRepresentation::String(TextEncoding::Utf8CodeUnit)), &heads)
                     },
                     None => {
                         println!("don't have heads");
@@ -448,7 +459,7 @@ impl GodotProject_rs {
     // todo: emit a signal when the branch is checked out
     // 
     // current workaround is to call get_checked_out_branch_id every frame and check if has changed in GDScript
-    
+
     fn checkout_branch(&mut self, branch_id: String) {
         let branches_metadata = self.get_branches_metadata_doc();
 
@@ -458,57 +469,7 @@ impl GodotProject_rs {
             DocumentId::from_str(&branch_id).unwrap()
         };
 
-        let repo_handle = self.repo_handle.clone();
-        let doc_handle_map = self.doc_handle_map.clone();
-        let branch_doc_id_clone = branch_doc_id.clone();
-
-        let state_mutex = self.state.clone();
-
-        self.runtime.spawn(async move {
-            let branch_doc_handle = match repo_handle.request_document(branch_doc_id).await {
-                Ok(doc_handle) => {
-                    doc_handle_map.add_handle(doc_handle.clone());
-                    doc_handle
-                },
-                Err(e) => {
-                    println!("failed to load branch doc {:?} {:?}", branch_id, e);
-                    return;
-                }            
-            };
-
-            let linked_doc_requests = get_linked_docs_of_branch(&branch_doc_handle).into_iter().map(|doc_id| {
-                (doc_id.clone(), repo_handle.request_document(doc_id))
-            }).collect::<Vec<_>>();
-
-            let linked_doc_requests_len = linked_doc_requests.len();
-
-            let linked_doc_handles = futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
-                future.map(move |result| {
-                    match result {
-                        Ok(handle) => Some(handle),
-                        Err(e) => {
-                            println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
-                            None
-                        }
-                    }
-                })
-            })).await.into_iter().flatten().collect::<Vec<_>>();
-
-            if linked_doc_handles.len() != linked_doc_requests_len {
-                println!("Couldn't check out branch {:?} because some linked docs couldn't be loaded", branch_id);
-                return;
-            }
-
-            // add all linked doc handles to the doc handle map
-            for doc_handle in linked_doc_handles {
-                doc_handle_map.add_handle(doc_handle.clone());
-            }
-
-            {
-                let mut state =state_mutex.lock().unwrap();
-                state.checked_out_doc_id = branch_doc_id_clone;            
-            } // Release the lock before emitting signal
-        });
+        self.checked_out_branch_tx.unbounded_send(branch_doc_id);
     }
 
     fn get_branches(&self) -> Vec<String> /* { name: String, id: String }[] */ {
@@ -528,7 +489,8 @@ impl GodotProject_rs {
     }
 
     fn get_checked_out_branch_id(&self) -> String {
-        return self.get_state().checked_out_doc_id.to_string();
+        let checked_out = self.get_state().checked_out_doc_id.to_string();
+        return checked_out;
     }
 
     // State api
@@ -603,13 +565,15 @@ impl GodotProject_rs {
 
     // needs to be called every frame to process the internal events
     // #[func]
-    fn process(&mut self) {        
-        let checked_out_doc_id = self.get_state().checked_out_doc_id;
+    fn process(&mut self) {
+        let mut checked_out_doc_id = self.get_state().checked_out_doc_id;
         let metadata_doc_id = self.get_state().branches_metadata_doc_id;
 
         // Process all pending sync events
         while let Ok(event) = self.sync_event_receiver.try_recv() {
             match event {
+                // this is internal, we don't pass this back to process
+                SyncEvent::NewDoc { doc_id: _doc_id, doc_handle: _doc_handle } => {}
                 SyncEvent::DocChanged { doc_id } => {
                     println!("doc changed event {:?} {:?}", doc_id, checked_out_doc_id);
                     // Check if branches metadata doc changed
@@ -618,6 +582,24 @@ impl GodotProject_rs {
                     } else if doc_id == checked_out_doc_id {
                         (self.signal_callback)(self.signal_user_data, SIGNAL_FILES_CHANGED.as_ptr(), std::ptr::null(), 0);
                     }
+                }
+
+                SyncEvent::CheckedOutBranch { doc_id, linked_doc_handles } => {
+                    {
+                        let prev_state = self.get_state();
+                        let mut state = self.state.lock().unwrap();
+                        *state = GodotProjectState {
+                            checked_out_doc_id: doc_id.clone(),
+                            branches_metadata_doc_id: prev_state.branches_metadata_doc_id,
+                        }
+                    } // Release the lock before emitting signal
+                    checked_out_doc_id = doc_id.clone();
+                    // add all linked doc handles to the doc handle map
+                    for doc_handle in linked_doc_handles {
+                        self.doc_handle_map.add_handle(doc_handle.clone());
+                    }
+                    let doc_id_c_str = std::ffi::CString::new(format!("{}", doc_id)).unwrap();
+                    (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), &doc_id_c_str.as_ptr(), 1);
                 }
             }
         }
@@ -655,12 +637,17 @@ impl GodotProject_rs {
 
     fn spawn_sync_task(
         runtime: &Runtime,
+        repo_handle: RepoHandle,
         mut new_docs: futures::channel::mpsc::UnboundedReceiver<DocHandle>,
+        mut checked_out_branch: futures::channel::mpsc::UnboundedReceiver<DocumentId>,
         doc_handle_map: DocHandleMap,
         sync_event_sender: Sender<SyncEvent>,
+        // state_getter: impl Fn() -> GodotProjectState + Clone + Send + Sync + 'static,
     ) {
         let initial_handles = doc_handle_map
             .current_handles();
+
+
 
         runtime.spawn(async move {
             // This is a stream of SyncEvent
@@ -711,6 +698,51 @@ impl GodotProject_rs {
                         });
 
                         all_doc_changes.push(change_stream.boxed());
+                    }
+
+                    checked_out_branch_id = checked_out_branch.select_next_some() => {
+                        
+                        let doc_id = checked_out_branch_id.clone();
+            
+                        let branch_doc_handle = match repo_handle.request_document(checked_out_branch_id.clone()).await {
+                            Ok(doc_handle) => {
+                                doc_handle_map.add_handle(doc_handle.clone());
+                                doc_handle
+                            },
+                            Err(e) => {
+                                println!("failed to load branch doc {:?} {:?}", checked_out_branch_id, e);
+                                return;
+                            }            
+                        };
+            
+                        let linked_doc_requests = get_linked_docs_of_branch(&branch_doc_handle).into_iter().map(|doc_id| {
+                            (doc_id.clone(), repo_handle.request_document(doc_id))
+                        }).collect::<Vec<_>>();
+            
+                        let linked_doc_requests_len = linked_doc_requests.len();
+            
+                        let linked_doc_handles = futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
+                            future.map(move |result| {
+                                match result {
+                                    Ok(handle) => Some(handle),
+                                    Err(e) => {
+                                        println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
+                                        None
+                                    }
+                                }
+                            })
+                        })).await.into_iter().flatten().collect::<Vec<_>>();
+            
+                        if linked_doc_handles.len() != linked_doc_requests_len {
+                            println!("Couldn't check out branch {:?} because some linked docs couldn't be loaded", checked_out_branch_id);
+                            return;
+                        }
+                        
+                        // for doc_handle in &linked_doc_handles {
+                        //     doc_handle_map.add_handle(doc_handle.clone());
+                        // }
+
+                        sync_event_sender.send(SyncEvent::CheckedOutBranch { doc_id: checked_out_branch_id.clone(), linked_doc_handles: linked_doc_handles }).unwrap();
                     }
                 }
             }
@@ -782,7 +814,7 @@ fn handle_changes(handle: DocHandle) -> impl futures::Stream<Item = Vec<automerg
             d.diff(
                 &heads_before,
                 &heads_after,
-                automerge::patches::TextRepresentation::String,
+                automerge::patches::TextRepresentation::String(TextEncoding::Utf8CodeUnit),
             )
         });
 
@@ -977,15 +1009,6 @@ fn get_linked_docs_of_branch(branch_doc_handle: &DocHandle) -> Vec<DocumentId> {
 }
 
 // C FFI functions for GodotProject
-
-#[no_mangle]
-pub extern "C" fn godot_project_get_branch_doc_id(godot_project: *const GodotProject_rs) -> *const std::os::raw::c_char {
-    let godot_project = unsafe { &*godot_project };
-    let branch_doc_id = godot_project.get_checked_out_branch_id();
-    let c_string = std::ffi::CString::new(branch_doc_id).unwrap();
-    c_string.into_raw()
-}
-
 
 #[no_mangle]
 pub extern "C" fn godot_project_get_fs_doc_id(godot_project: *const GodotProject_rs) -> *const std::os::raw::c_char { 
