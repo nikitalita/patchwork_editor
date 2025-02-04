@@ -338,16 +338,22 @@ impl GodotProject_rs {
 
     // #[func]
     fn save_file(&self, path: String, heads: Option<Vec<ChangeHash>>, content: StringOrPackedByteArray) {
+
+        // ignore if file is already up to date
+        if let Some(stored_content) = self.get_file(path.clone()) {
+            if stored_content == content {
+                println!("file {:?} is already up to date", path.clone());
+                return;
+            }
+        }
+
         self.get_checked_out_doc_handle()
-        .with_doc_mut(|d| {
+        .with_doc_mut(|d| {    
                 let mut tx = match heads {
                     Some(heads) => {
-                        println!("change at heads {:?}", heads);
-
                         d.transaction_at(PatchLog::inactive(TextRepresentation::String(TextEncoding::Utf8CodeUnit)), &heads)
                     },
                     None => {
-                        println!("don't have heads");
                         d.transaction()
                     }
                 };
