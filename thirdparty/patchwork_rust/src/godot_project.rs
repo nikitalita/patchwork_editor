@@ -58,7 +58,7 @@ struct Branch {
 enum SyncEvent {
     NewDoc { doc_id: DocumentId, doc_handle: DocHandle },
     DocChanged { doc_id: DocumentId },
-    CheckedOutBranch { doc_id: DocumentId, linked_doc_handles: Vec<DocHandle> },
+    CheckedOutBranch { doc_id: DocumentId },
 }
 
 
@@ -81,13 +81,13 @@ pub struct GodotProject_rs {
     // base: Base<Node>,
     runtime: Runtime,
     repo_handle: RepoHandle,
-    state: Arc<Mutex<GodotProjectState>>,
+    branches_metadata_doc_id: DocumentId,
+    main_branch_doc_id: DocumentId,
+    checked_out_doc_id: DocumentId,
     doc_handle_map: DocHandleMap,
     signal_user_data: *mut c_void,
     signal_callback: AutoMergeSignalCallback,
     sync_event_receiver: Receiver<SyncEvent>,
-    iters_without_handled_doc_events: u32,
-    initial_handled_doc_events: HashSet<DocumentId>,
     checked_out_branch_tx: UnboundedSender<DocumentId>,
 }
 
@@ -170,18 +170,19 @@ impl GodotProject_rs {
             sync_event_sender.clone(),                        
         );    
 
-        let initial_state = block_on(init_godot_project_state(&repo_handle, doc_handle_map.clone(), DocumentId::from_str(&maybe_branches_metadata_doc_id).ok()));
+        let (main_branch_doc_id, branches_metadata_doc_id) = block_on(init_godot_project_state(&repo_handle, doc_handle_map.clone(), DocumentId::from_str(&maybe_branches_metadata_doc_id).ok()));
+
 
         GodotProject_rs {
             runtime,
             repo_handle,
-            state: Arc::new(Mutex::new(initial_state)),
+            checked_out_doc_id: main_branch_doc_id.clone(),
+            main_branch_doc_id: main_branch_doc_id.clone(),
+            branches_metadata_doc_id,
             doc_handle_map,
             sync_event_receiver,
             signal_user_data,
             signal_callback,
-            iters_without_handled_doc_events: 0,            
-            initial_handled_doc_events: HashSet::new(),
             checked_out_branch_tx,
         }    
     }
@@ -197,12 +198,9 @@ impl GodotProject_rs {
         }
     }
 
-    fn get_state(&self) -> GodotProjectState {    
-        return self.state.lock().unwrap().clone();
-    }
 
     fn get_branches_metadata_doc_handle(&self) -> DocHandle {    
-        match self.doc_handle_map.get_handle(&self.get_state().branches_metadata_doc_id) {
+        match self.doc_handle_map.get_handle(&self.branches_metadata_doc_id) {
             Some(doc_handle) => doc_handle,
             None => panic!("project is not initialized properly, can't load branches metadata doc handle"),
         }
@@ -213,7 +211,7 @@ impl GodotProject_rs {
     }
 
     fn get_checked_out_doc_handle(&self) -> DocHandle {    
-        match self.doc_handle_map.get_handle(&self.get_state().checked_out_doc_id) {
+        match self.doc_handle_map.get_handle(&self.checked_out_doc_id) {
             Some(doc_handle) => doc_handle,
             None => panic!("project is not initialized properly, can't load checked out doc"),
         }
@@ -221,7 +219,7 @@ impl GodotProject_rs {
 
     // #[func]
     fn get_doc_id(&self) -> String {    
-        self.get_state().branches_metadata_doc_id.to_string()
+        self.branches_metadata_doc_id.to_string()
     }
 
 
@@ -408,17 +406,15 @@ impl GodotProject_rs {
     }
 
     fn merge_branch(&self, branch_id: String) {
-        let branches_metadata_doc_id = self.get_state().branches_metadata_doc_id;
         let mut branches_metadata = self.get_branches_metadata_doc();
       
         // merge branch into main
 
         let branch_doc = self.doc_handle_map.get_handle(&DocumentId::from_str(&branch_id).unwrap()).unwrap();
-
         let main_doc_id = DocumentId::from_str(branches_metadata.main_doc_id.as_str()).unwrap();
 
         branch_doc.with_doc_mut(|branch_doc| {
-            self.update_doc(main_doc_id, |d| {
+            self.update_doc(&main_doc_id, |d| {
                 d.merge(branch_doc);
             });
         });
@@ -428,7 +424,7 @@ impl GodotProject_rs {
         let branch = branches_metadata.branches.get_mut(&branch_id).unwrap();
         branch.is_merged = true;
 
-        self.update_doc(branches_metadata_doc_id, |d| {
+        self.update_doc(&self.branches_metadata_doc_id, |d| {
             let mut tx = d.transaction();
             reconcile(&mut tx, branches_metadata).unwrap();
             tx.commit();
@@ -495,8 +491,7 @@ impl GodotProject_rs {
     }
 
     fn get_checked_out_branch_id(&self) -> String {
-        let checked_out = self.get_state().checked_out_doc_id.to_string();
-        return checked_out;
+        return self.checked_out_doc_id.to_string();
     }
 
     // State api
@@ -572,38 +567,24 @@ impl GodotProject_rs {
     // needs to be called every frame to process the internal events
     // #[func]
     fn process(&mut self) {
-        let mut checked_out_doc_id = self.get_state().checked_out_doc_id;
-        let metadata_doc_id = self.get_state().branches_metadata_doc_id;
-
         // Process all pending sync events
         while let Ok(event) = self.sync_event_receiver.try_recv() {
             match event {
                 // this is internal, we don't pass this back to process
                 SyncEvent::NewDoc { doc_id: _doc_id, doc_handle: _doc_handle } => {}
                 SyncEvent::DocChanged { doc_id } => {
-                    println!("doc changed event {:?} {:?}", doc_id, checked_out_doc_id);
+                    println!("doc changed event {:?} {:?}", doc_id, self.checked_out_doc_id);
                     // Check if branches metadata doc changed
-                    if doc_id == metadata_doc_id  {                
+                    if doc_id == self.branches_metadata_doc_id  {                
                         (self.signal_callback)(self.signal_user_data, BRANCHES_CHANGED.as_ptr(), std::ptr::null(), 0);
-                    } else if doc_id == checked_out_doc_id {
+                    } else if doc_id == self.checked_out_doc_id {
                         (self.signal_callback)(self.signal_user_data, SIGNAL_FILES_CHANGED.as_ptr(), std::ptr::null(), 0);
                     }
                 }
 
-                SyncEvent::CheckedOutBranch { doc_id, linked_doc_handles } => {
-                    {
-                        let prev_state = self.get_state();
-                        let mut state = self.state.lock().unwrap();
-                        *state = GodotProjectState {
-                            checked_out_doc_id: doc_id.clone(),
-                            branches_metadata_doc_id: prev_state.branches_metadata_doc_id,
-                        }
-                    } // Release the lock before emitting signal
-                    checked_out_doc_id = doc_id.clone();
-                    // add all linked doc handles to the doc handle map
-                    for doc_handle in linked_doc_handles {
-                        self.doc_handle_map.add_handle(doc_handle.clone());
-                    }
+                SyncEvent::CheckedOutBranch { doc_id} => {
+                    self.checked_out_doc_id = doc_id.clone();
+
                     let doc_id_c_str = std::ffi::CString::new(format!("{}", doc_id)).unwrap();
                     (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), &doc_id_c_str.as_ptr(), 1);
                 }
@@ -648,12 +629,9 @@ impl GodotProject_rs {
         mut checked_out_branch: futures::channel::mpsc::UnboundedReceiver<DocumentId>,
         doc_handle_map: DocHandleMap,
         sync_event_sender: Sender<SyncEvent>,
-        // state_getter: impl Fn() -> GodotProjectState + Clone + Send + Sync + 'static,
     ) {
         let initial_handles = doc_handle_map
             .current_handles();
-
-
 
         runtime.spawn(async move {
             // This is a stream of SyncEvent
@@ -705,7 +683,6 @@ impl GodotProject_rs {
 
                         all_doc_changes.push(change_stream.boxed());
                     }
-
                     checked_out_branch_id = checked_out_branch.select_next_some() => {
                         
                         let doc_id = checked_out_branch_id.clone();
@@ -744,11 +721,11 @@ impl GodotProject_rs {
                             return;
                         }
                         
-                        // for doc_handle in &linked_doc_handles {
-                        //     doc_handle_map.add_handle(doc_handle.clone());
-                        // }
+                        for doc_handle in linked_doc_handles {
+                            doc_handle_map.add_handle(doc_handle.clone());
+                        }
 
-                        sync_event_sender.send(SyncEvent::CheckedOutBranch { doc_id: checked_out_branch_id.clone(), linked_doc_handles: linked_doc_handles }).unwrap();
+                        sync_event_sender.send(SyncEvent::CheckedOutBranch { doc_id: checked_out_branch_id.clone() }).unwrap();
                     }
                 }
             }
@@ -757,11 +734,11 @@ impl GodotProject_rs {
 
     // DOC ACCESS + MANIPULATION
 
-    fn update_doc<F>(&self, doc_id: DocumentId, f: F)
+    fn update_doc<F>(&self, doc_id: &DocumentId, f: F)
     where
         F: FnOnce(&mut Automerge),
     {
-        if let Some(doc_handle) = self.doc_handle_map.get_handle(&doc_id) {
+        if let Some(doc_handle) = self.doc_handle_map.get_handle(doc_id) {
             doc_handle.with_doc_mut(f);
         }
     }
@@ -775,7 +752,7 @@ impl GodotProject_rs {
 
         self.doc_handle_map.add_handle(doc_handle.clone());
 
-        self.update_doc(doc_id.clone(), f);
+        self.update_doc(&doc_id, f);
 
         doc_id
     }
@@ -839,7 +816,7 @@ fn parse_automerge_url(url: &str) -> Option<DocumentId> {
     DocumentId::from_str(hash).ok()
 }
 
-async fn init_godot_project_state(repo_handle: &RepoHandle, doc_handle_map: DocHandleMap, maybe_branches_metadata_doc_id: Option<DocumentId>) -> GodotProjectState {
+async fn init_godot_project_state(repo_handle: &RepoHandle, doc_handle_map: DocHandleMap, maybe_branches_metadata_doc_id: Option<DocumentId>) -> (DocumentId, DocumentId) {
     match maybe_branches_metadata_doc_id {
         None => {
             // Create new project doc
@@ -855,7 +832,7 @@ async fn init_godot_project_state(repo_handle: &RepoHandle, doc_handle_map: DocH
                 );
                 tx.commit();
             });
-            let project_doc_id = project_doc_handle.document_id();
+            let main_branch_doc_id = project_doc_handle.document_id();
 
             // Create new branches metadata doc
             let branches_metadata_doc_handle = repo_handle.new_document();
@@ -864,14 +841,13 @@ async fn init_godot_project_state(repo_handle: &RepoHandle, doc_handle_map: DocH
                 let _ = reconcile(
                     &mut tx,
                     BranchesMetadataDoc {
-                        main_doc_id: project_doc_id.to_string(),
+                        main_doc_id: main_branch_doc_id.to_string(),
                         branches: HashMap::new(),
                     },
                 );
                 tx.commit();
             });
 
-            let project_doc_id_clone = project_doc_id.clone();
             let branches_metadata_doc_handle_clone = branches_metadata_doc_handle.clone();
 
             // save doc handles to the doc_handle_map
@@ -880,10 +856,7 @@ async fn init_godot_project_state(repo_handle: &RepoHandle, doc_handle_map: DocH
                 doc_handle_map.add_handle(branches_metadata_doc_handle.clone());
             }
 
-            return GodotProjectState {
-                    checked_out_doc_id: project_doc_id_clone.clone(),
-                    branches_metadata_doc_id: branches_metadata_doc_handle_clone.document_id(),
-            }        
+            return (main_branch_doc_id, branches_metadata_doc_handle_clone.document_id());        
             
         },
 
@@ -903,10 +876,8 @@ async fn init_godot_project_state(repo_handle: &RepoHandle, doc_handle_map: DocH
 
             doc_handle_map.add_handle(branches_metadata_doc_handle.clone());
 
-            return GodotProjectState {
-                checked_out_doc_id: DocumentId::from_str(&branches_metadata.main_doc_id).unwrap(),
-                branches_metadata_doc_id: branches_metadata_doc_id_clone,
-            }                        
+            let main_branch_doc_id = DocumentId::from_str(&branches_metadata.main_doc_id).unwrap();
+            return (main_branch_doc_id, branches_metadata_doc_id_clone);        
         }
     }
 }
