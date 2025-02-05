@@ -25,7 +25,6 @@ struct BinaryFile {
     content: Vec<u8>,
 }
 
-
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 pub struct FileEntry {
     pub content: Option<String>,
@@ -552,6 +551,9 @@ impl GodotProject_rs {
                     self.checked_out_branch_doc_id = Some(branch_doc_id.clone());
                     let doc_id_c_str = std::ffi::CString::new(format!("{}", &branch_doc_id)).unwrap();
                     (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(),  &doc_id_c_str.as_ptr(), 1);
+                },
+                DriverOutputEvent::Initialized => {
+                    (self.signal_callback)(self.signal_user_data, SIGNAL_INITIALIZED.as_ptr(), std::ptr::null(), 0);
                 },
             }
         }

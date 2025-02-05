@@ -41,6 +41,7 @@ pub enum DriverInputEvent {
 }
 
 pub enum DriverOutputEvent {
+    Initialized,
     DocHandleChanged {
         doc_handle: DocHandle,
     },
@@ -212,7 +213,9 @@ impl GodotProjectDriver {
                                         state.set_main_branch_doc_id(main_branch_doc_handle.document_id());
                                         state.set_branches(&branches);
                                     }
-                                }                            
+                                }
+
+                                state.tx.unbounded_send(DriverOutputEvent::Initialized).unwrap();                  
                             }
 
                             DriverInputEvent::CheckoutBranch { branch_doc_id } => {
