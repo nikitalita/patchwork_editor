@@ -11,14 +11,14 @@ use ::safer_ffi::prelude::*;
 use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, TextEncoding, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
 use autosurgeon::{bytes, hydrate, reconcile, Hydrate, Reconcile};
-use futures::{channel::mpsc::UnboundedSender, executor::block_on, FutureExt, StreamExt};
+use futures::{channel::mpsc::{UnboundedReceiver, UnboundedSender}, executor::block_on, FutureExt, StreamExt};
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::os::raw::c_char;
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
 
-use crate::{doc_utils::SimpleDocReader, doc_handle_map::DocHandleMap};
+use crate::{doc_handle_map::DocHandleMap, doc_utils::SimpleDocReader, godot_project_driver::{DriverInputEvent, DriverOutputEvent, GodotProjectDriver}};
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 struct BinaryFile {
@@ -42,9 +42,9 @@ type AutoMergeSignalCallback = extern "C" fn(*mut c_void, *const std::os::raw::c
 
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
-struct BranchesMetadataDoc {
-    main_doc_id: String,
-    branches: HashMap<String, Branch>,
+pub struct BranchesMetadataDoc {
+    pub main_doc_id: String,
+    pub branches: HashMap<String, Branch>,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
@@ -78,21 +78,17 @@ struct GodotProjectState {
 // #[derive(GodotClass)]
 // #[class(no_init, base=Node)]
 pub struct GodotProject_rs {
-    // base: Base<Node>,
-    runtime: Runtime,
-    repo_handle: RepoHandle,
-    branches_metadata_doc_id: DocumentId,
-    main_branch_doc_id: DocumentId,
-    checked_out_doc_id: DocumentId,
-    doc_handle_map: DocHandleMap,
+    branches: HashMap<String, Branch>,
+    doc_handles: HashMap<DocumentId, DocHandle>,
     signal_user_data: *mut c_void,
     signal_callback: AutoMergeSignalCallback,
-    sync_event_receiver: Receiver<SyncEvent>,
-    checked_out_branch_tx: UnboundedSender<DocumentId>,
+    driver: GodotProjectDriver,
+    driver_input_tx: UnboundedSender<DriverInputEvent>,
+    driver_output_rx: UnboundedReceiver<DriverOutputEvent>,
 }
 
 const SERVER_URL: &str = "104.131.179.247:8080";
-static BRANCHES_CHANGED: std::sync::LazyLock<std::ffi::CString> = std::sync::LazyLock::new(|| std::ffi::CString::new("branches_changed").unwrap());
+static SIGNAL_BRANCHES_CHANGED: std::sync::LazyLock<std::ffi::CString> = std::sync::LazyLock::new(|| std::ffi::CString::new("branches_changed").unwrap());
 static SIGNAL_FILES_CHANGED: std::sync::LazyLock<std::ffi::CString> = std::sync::LazyLock::new(|| std::ffi::CString::new("files_changed").unwrap());
 static SIGNAL_CHECKED_OUT_BRANCH: std::sync::LazyLock<std::ffi::CString> = std::sync::LazyLock::new(|| std::ffi::CString::new("checked_out_branch").unwrap());
 static SIGNAL_FILE_CHANGED: std::sync::LazyLock<std::ffi::CString> = std::sync::LazyLock::new(|| std::ffi::CString::new("file_changed").unwrap());
@@ -135,55 +131,25 @@ impl GodotProject_rs {
     // #[func]
     // hack: pass in empty string to create a new doc
     // godot rust doens't seem to support Option args
-    fn create(maybe_branches_metadata_doc_id: String, signal_user_data: *mut c_void, signal_callback: AutoMergeSignalCallback) -> GodotProject_rs /*-> Gd<Self>*/ {
-        let runtime: Runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _guard = runtime.enter();
+    fn create(maybe_branches_metadata_doc_id: String, signal_user_data: *mut c_void, signal_callback: AutoMergeSignalCallback) -> GodotProject_rs /*-> Gd<Self>*/ {    
 
-        let _ = tracing_subscriber::fmt::try_init();
+        let (driver_input_tx, driver_input_rx) = futures::channel::mpsc::unbounded();
+        let (driver_output_tx, driver_output_rx) = futures::channel::mpsc::unbounded();
 
-        // todo: store in project folder
-        let storage = FsStorage::open("/tmp/automerge-godot-data").unwrap();
-        let repo = Repo::new(None, Box::new(storage));
-        let repo_handle = repo.run();
+        let driver = GodotProjectDriver::create();
 
-        let (new_doc_tx, new_doc_rx) = futures::channel::mpsc::unbounded();
+        driver.spawn(driver_input_rx, driver_output_tx);
 
-        let (checked_out_branch_tx, checked_out_branch_rx) = futures::channel::mpsc::unbounded();
-
-        let doc_handle_map = DocHandleMap::new(new_doc_tx.clone());
-       
-        let (sync_event_sender, sync_event_receiver) = std::sync::mpsc::channel();
-
-        // Spawn connection task
-        Self::spawn_connection_task(&runtime, repo_handle.clone());
-        let repo_handle_clone = repo_handle.clone();
-        // Spawn sync task for all doc handles
-        Self::spawn_sync_task(
-            &runtime,
-            repo_handle_clone,
-            new_doc_rx,
-            checked_out_branch_rx,
-            doc_handle_map.clone(),
-            sync_event_sender.clone(),                        
-        );    
-
-        let (main_branch_doc_id, branches_metadata_doc_id) = block_on(init_godot_project_state(&repo_handle, doc_handle_map.clone(), DocumentId::from_str(&maybe_branches_metadata_doc_id).ok()));
-
+        driver_input_tx.unbounded_send(DriverInputEvent::InitBranchesMetadataDoc { doc_id: DocumentId::from_str(&maybe_branches_metadata_doc_id).unwrap() }).unwrap();  
 
         GodotProject_rs {
-            runtime,
-            repo_handle,
-            checked_out_doc_id: main_branch_doc_id.clone(),
-            main_branch_doc_id: main_branch_doc_id.clone(),
-            branches_metadata_doc_id,
-            doc_handle_map,
-            sync_event_receiver,
+            branches: HashMap::new(),
+            doc_handles: HashMap::new(),
             signal_user_data,
             signal_callback,
-            checked_out_branch_tx,
+            driver,
+            driver_input_tx,
+            driver_output_rx,
         }    
     }
 
@@ -191,269 +157,274 @@ impl GodotProject_rs {
 
     // #[func]
     fn stop(&self) {
-        // todo: is this right?
-        unsafe {
-            let runtime = std::ptr::read(&self.runtime);
-            runtime.shutdown_background();
-        }
+      // todo
     }
 
 
-    fn get_branches_metadata_doc_handle(&self) -> DocHandle {    
-        match self.doc_handle_map.get_handle(&self.branches_metadata_doc_id) {
-            Some(doc_handle) => doc_handle,
-            None => panic!("project is not initialized properly, can't load branches metadata doc handle"),
-        }
+    fn get_branches_metadata_doc_handle(&self) -> DocHandle {  
+        todo!("not implemented");
+        // match self.doc_handle_map.get_handle(&self.branches_metadata_doc_id) {
+        //     Some(doc_handle) => doc_handle,
+        //     None => panic!("project is not initialized properly, can't load branches metadata doc handle"),
+        // }
     }
 
     fn get_branches_metadata_doc(&self) -> BranchesMetadataDoc {    
-        self.get_branches_metadata_doc_handle().with_doc(|d| hydrate(d).unwrap())
+        todo!("not implemented");
+        // self.get_branches_metadata_doc_handle().with_doc(|d| hydrate(d).unwrap())
     }
 
     fn get_checked_out_doc_handle(&self) -> DocHandle {    
-        match self.doc_handle_map.get_handle(&self.checked_out_doc_id) {
-            Some(doc_handle) => doc_handle,
-            None => panic!("project is not initialized properly, can't load checked out doc"),
-        }
+        todo!("not implemented");
+        // match self.doc_handle_map.get_handle(&self.checked_out_doc_id) {
+        //     Some(doc_handle) => doc_handle,
+        //     None => panic!("project is not initialized properly, can't load checked out doc"),
+        // }
     }
 
     // #[func]
     fn get_doc_id(&self) -> String {    
-        self.branches_metadata_doc_id.to_string()
+        todo!("not implemented");
+        // self.branches_metadata_doc_id.to_string()
     }
 
 
     fn get_heads(&self) -> Vec<String> /* String[] */ {    
-        self.get_checked_out_doc_handle().with_doc(|d| {        
-            d.get_heads()
-            .to_vec()
-            .iter()
-            .map(|h| h.to_string())
-            .collect::<Vec<String>>()
-        })
+        todo!("not implemented");
+        // self.get_checked_out_doc_handle().with_doc(|d| {        
+        //     d.get_heads()
+        //     .to_vec()
+        //     .iter()
+        //     .map(|h| h.to_string())
+        //     .collect::<Vec<String>>()
+        // })
     }
 
 
     fn list_all_files(&self) -> Vec<String> {
-        self.get_checked_out_doc_handle().with_doc(|doc| {
+        todo!("not implemented");
+    //     self.get_checked_out_doc_handle().with_doc(|doc| {
 
-        let files = match doc.get_obj_id(ROOT, "files") {
-            Some(files) => files,
-            _ => {
-                return vec![];
-            }
-        };
-        doc.keys(files).collect::<Vec<String>>()
+    //     let files = match doc.get_obj_id(ROOT, "files") {
+    //         Some(files) => files,
+    //         _ => {
+    //             return vec![];
+    //         }
+    //     };
+    //     doc.keys(files).collect::<Vec<String>>()
 
-    })
+    // })
     }
 
     fn get_file(&self, path: String) -> Option<StringOrPackedByteArray> {
-        let mut content_doc_id_result: Option<DocumentId> = None;
-        let result = self.get_checked_out_doc_handle().with_doc(|doc| {
-            let files = doc.get(ROOT, "files").unwrap().unwrap().1;
-            // does the file exist?
-            let file_entry = match doc.get(files, path) {
-                Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
-                _ => return None,
-            };
+        todo!("not implemented");
+        // let mut content_doc_id_result: Option<DocumentId> = None;
+        // let result = self.get_checked_out_doc_handle().with_doc(|doc| {
+        //     let files = doc.get(ROOT, "files").unwrap().unwrap().1;
+        //     // does the file exist?
+        //     let file_entry = match doc.get(files, path) {
+        //         Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
+        //         _ => return None,
+        //     };
 
-            // try to read file as text
-            match doc.get(&file_entry, "content") {
-                Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
-                    match doc.text(content) {
-                        Ok(text) => return Some(StringOrPackedByteArray::String(text.to_string())),
-                        Err(_) => {}
-                    }
-                },
-                _ => {}
-            }
+        //     // try to read file as text
+        //     match doc.get(&file_entry, "content") {
+        //         Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
+        //             match doc.text(content) {
+        //                 Ok(text) => return Some(StringOrPackedByteArray::String(text.to_string())),
+        //                 Err(_) => {}
+        //             }
+        //         },
+        //         _ => {}
+        //     }
 
-            // ... otherwise try to read as linked binary doc
+        //     // ... otherwise try to read as linked binary doc
 
 
-            if let Some(url) = doc.get_string(&file_entry, "url") {
+        //     if let Some(url) = doc.get_string(&file_entry, "url") {
 
-                // parse doc url
-                let doc_id = match parse_automerge_url(&url) {
-                    Some(url) => url,
-                    _ => return None
-                };
-                content_doc_id_result = Some(doc_id);
-            };
+        //         // parse doc url
+        //         let doc_id = match parse_automerge_url(&url) {
+        //             Some(url) => url,
+        //             _ => return None
+        //         };
+        //         content_doc_id_result = Some(doc_id);
+        //     };
 
-            None
-        });
-        if result.is_none() {
-            if let Some(content_doc_id) = content_doc_id_result {
-                // // read content doc
-                let content_doc = match self.doc_handle_map.get_doc(&content_doc_id) {
-                    Some(doc) => doc,
-                    _ => return None
-                };
+        //     None
+        // });
+        // if result.is_none() {
+        //     if let Some(content_doc_id) = content_doc_id_result {
+        //         // // read content doc
+        //         let content_doc = match self.doc_handle_map.get_doc(&content_doc_id) {
+        //             Some(doc) => doc,
+        //             _ => return None
+        //         };
 
-                // get content of binary file
-                if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
-                    return Some(StringOrPackedByteArray::PackedByteArray(bytes));
-                };
-            }
-        }
+        //         // get content of binary file
+        //         if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
+        //             return Some(StringOrPackedByteArray::PackedByteArray(bytes));
+        //         };
+        //     }
+        // }
 
-        result
+        // result
     }
 
     fn get_file_at(&self, path: String, heads: Vec<String> /* String[] */) -> Option<String> /* String? */
     {
-        self.get_checked_out_doc_handle().with_doc(|doc| {
+        todo!("not implemented");
+        // self.get_checked_out_doc_handle().with_doc(|doc| {
 
-        let heads: Vec<ChangeHash> = heads
-            .iter()
-            .map(|h| ChangeHash::from_str(h.to_string().as_str()).unwrap())
-            .collect();
+        // let heads: Vec<ChangeHash> = heads
+        //     .iter()
+        //     .map(|h| ChangeHash::from_str(h.to_string().as_str()).unwrap())
+        //     .collect();
 
-        let files = doc.get(ROOT, "files").unwrap().unwrap().1;
+        // let files = doc.get(ROOT, "files").unwrap().unwrap().1;
 
-        return match doc.get_at(files, path, &heads) {
-            Ok(Some((value, _))) => Some(value.into_string().unwrap_or_default()),
-            _ => None,
-        };  
+        // return match doc.get_at(files, path, &heads) {
+        //     Ok(Some((value, _))) => Some(value.into_string().unwrap_or_default()),
+        //     _ => None,
+        // };  
 
-    })
+        // })
     }
 
 
     fn get_changes(&self) -> Vec<String> /* String[]  */ {
-        self.get_checked_out_doc_handle().with_doc(|doc| {
+        todo!("not implemented");
+        // self.get_checked_out_doc_handle().with_doc(|doc| {
 
 
-        doc.get_changes(&[])
-            .to_vec()
-            .iter()
-            .map(|c| c.hash().to_string())
-            .collect::<Vec<String>>()
-    })
+        // doc.get_changes(&[])
+        //     .to_vec()
+        //     .iter()
+        //     .map(|c| c.hash().to_string())
+        //     .collect::<Vec<String>>()
+        // })
     }
 
     // #[func]
     fn save_file(&self, path: String, heads: Option<Vec<ChangeHash>>, content: StringOrPackedByteArray) {
+        todo!("not implemented");
+        // // ignore if file is already up to date
+        // if let Some(stored_content) = self.get_file(path.clone()) {
+        //     if stored_content == content {
+        //         println!("file {:?} is already up to date", path.clone());
+        //         return;
+        //     }
+        // }
 
-        // ignore if file is already up to date
-        if let Some(stored_content) = self.get_file(path.clone()) {
-            if stored_content == content {
-                println!("file {:?} is already up to date", path.clone());
-                return;
-            }
-        }
+        // self.get_checked_out_doc_handle()
+        // .with_doc_mut(|d| {    
+        //         let mut tx = match heads {
+        //             Some(heads) => {
+        //                 d.transaction_at(PatchLog::inactive(TextRepresentation::String(TextEncoding::Utf8CodeUnit)), &heads)
+        //             },
+        //             None => {
+        //                 d.transaction()
+        //             }
+        //         };
 
-        self.get_checked_out_doc_handle()
-        .with_doc_mut(|d| {    
-                let mut tx = match heads {
-                    Some(heads) => {
-                        d.transaction_at(PatchLog::inactive(TextRepresentation::String(TextEncoding::Utf8CodeUnit)), &heads)
-                    },
-                    None => {
-                        d.transaction()
-                    }
-                };
+        //         let files = match tx.get(ROOT, "files") {
+        //             Ok(Some((automerge::Value::Object(ObjType::Map), files))) => files,
+        //             _ => panic!("Invalid project doc, doesn't have files map"),
+        //         };
 
-                let files = match tx.get(ROOT, "files") {
-                    Ok(Some((automerge::Value::Object(ObjType::Map), files))) => files,
-                    _ => panic!("Invalid project doc, doesn't have files map"),
-                };
+        //         match content {
+        //             StringOrPackedByteArray::String(content) => {
+        //                 println!("write string {:}", path);
 
-                match content {
-                    StringOrPackedByteArray::String(content) => {
-                        println!("write string {:}", path);
+        //                 // get existing file url or create new one                        
+        //                 let file_entry = match tx.get(&files, &path) {
+        //                     Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
+        //                     _ => tx.put_object(files, &path, ObjType::Map).unwrap()
+        //                 };
 
-                        // get existing file url or create new one                        
-                        let file_entry = match tx.get(&files, &path) {
-                            Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
-                            _ => tx.put_object(files, &path, ObjType::Map).unwrap()
-                        };
+        //                 // delete url in file entry if it previously had one
+        //                 if let Ok(Some((_, _))) = tx.get(&file_entry, "url") {
+        //                     let _ = tx.delete(&file_entry, "url");
+        //                 }
 
-                        // delete url in file entry if it previously had one
-                        if let Ok(Some((_, _))) = tx.get(&file_entry, "url") {
-                            let _ = tx.delete(&file_entry, "url");
-                        }
+        //                 // either get existing text or create new text
+        //                 let content_key = match tx.get(&file_entry, "content") {
+        //                     Ok(Some((automerge::Value::Object(ObjType::Text), content))) => content,
+        //                     _ => tx.put_object(&file_entry, "content", ObjType::Text).unwrap(),
+        //                 };
+        //                 let _ = tx.update_text(&content_key, &content);
+        //             },
+        //             StringOrPackedByteArray::PackedByteArray(content) => {
+        //                 println!("write binary {:}", path);
 
-                        // either get existing text or create new text
-                        let content_key = match tx.get(&file_entry, "content") {
-                            Ok(Some((automerge::Value::Object(ObjType::Text), content))) => content,
-                            _ => tx.put_object(&file_entry, "content", ObjType::Text).unwrap(),
-                        };
-                        let _ = tx.update_text(&content_key, &content);
-                    },
-                    StringOrPackedByteArray::PackedByteArray(content) => {
-                        println!("write binary {:}", path);
+        //                 // create content doc
+        //                 let content_doc_id = self.create_doc(|d| {
+        //                     let mut tx = d.transaction();
+        //                     let _ = tx.put(ROOT, "content", content.to_vec());
+        //                     tx.commit();
+        //                 });
 
-                        // create content doc
-                        let content_doc_id = self.create_doc(|d| {
-                            let mut tx = d.transaction();
-                            let _ = tx.put(ROOT, "content", content.to_vec());
-                            tx.commit();
-                        });
+        //                 // write url to content doc into project doc
+        //                 let file_entry = tx.put_object(files, path, ObjType::Map);
+        //                 let _ = tx.put(file_entry.unwrap(), "url", format!("automerge:{}", content_doc_id));
+        //             },
+        //         }
 
-                        // write url to content doc into project doc
-                        let file_entry = tx.put_object(files, path, ObjType::Map);
-                        let _ = tx.put(file_entry.unwrap(), "url", format!("automerge:{}", content_doc_id));
-                    },
-                }
-
-                tx.commit();
-            });
-
-    
+        //         tx.commit();
+        //     });
     }
 
     fn merge_branch(&self, branch_id: String) {
-        let mut branches_metadata = self.get_branches_metadata_doc();
+        todo!("not implemented");
+        // let mut branches_metadata = self.get_branches_metadata_doc();
       
-        // merge branch into main
+        // // merge branch into main
 
-        let branch_doc = self.doc_handle_map.get_handle(&DocumentId::from_str(&branch_id).unwrap()).unwrap();
-        let main_doc_id = DocumentId::from_str(branches_metadata.main_doc_id.as_str()).unwrap();
+        // let branch_doc = self.doc_handle_map.get_handle(&DocumentId::from_str(&branch_id).unwrap()).unwrap();
+        // let main_doc_id = DocumentId::from_str(branches_metadata.main_doc_id.as_str()).unwrap();
 
-        branch_doc.with_doc_mut(|branch_doc| {
-            self.update_doc(&main_doc_id, |d| {
-                d.merge(branch_doc);
-            });
-        });
+        // branch_doc.with_doc_mut(|branch_doc| {
+        //     self.update_doc(&main_doc_id, |d| {
+        //         d.merge(branch_doc);
+        //     });
+        // });
         
-        // mark branch as merged
+        // // mark branch as merged
 
-        let branch = branches_metadata.branches.get_mut(&branch_id).unwrap();
-        branch.is_merged = true;
+        // let branch = branches_metadata.branches.get_mut(&branch_id).unwrap();
+        // branch.is_merged = true;
 
-        self.update_doc(&self.branches_metadata_doc_id, |d| {
-            let mut tx = d.transaction();
-            reconcile(&mut tx, branches_metadata).unwrap();
-            tx.commit();
-        });
+        // self.update_doc(&self.branches_metadata_doc_id, |d| {
+        //     let mut tx = d.transaction();
+        //     reconcile(&mut tx, branches_metadata).unwrap();
+        //     tx.commit();
+        // });
     }
 
 
     fn create_branch(&self, name: String) -> String {
-        let mut branches_metadata = self.get_branches_metadata_doc();
+        todo!("not implemented");
+        // let mut branches_metadata = self.get_branches_metadata_doc();
 
-        let main_doc_id = DocumentId::from_str(&branches_metadata.main_doc_id).unwrap();
-        let new_doc_id = self.clone_doc(main_doc_id);
+        // let main_doc_id = DocumentId::from_str(&branches_metadata.main_doc_id).unwrap();
+        // let new_doc_id = self.clone_doc(main_doc_id);
 
-        branches_metadata.branches.insert(
-            new_doc_id.to_string(),
-            Branch {
-                is_merged: false,
-                name,
-                id: new_doc_id.to_string(),
-            },
-        );
+        // branches_metadata.branches.insert(
+        //     new_doc_id.to_string(),
+        //     Branch {
+        //         is_merged: false,
+        //         name,
+        //         id: new_doc_id.to_string(),
+        //     },
+        // );
 
-        self.get_branches_metadata_doc_handle().with_doc_mut(|d| {
-            let mut tx = d.transaction();
-            reconcile(&mut tx, branches_metadata).unwrap();
-            tx.commit();
-        });
+        // self.get_branches_metadata_doc_handle().with_doc_mut(|d| {
+        //     let mut tx = d.transaction();
+        //     reconcile(&mut tx, branches_metadata).unwrap();
+        //     tx.commit();
+        // });
 
-        new_doc_id.to_string()
+        // new_doc_id.to_string()
     }
 
     // checkout branch in a separate thread
@@ -463,101 +434,108 @@ impl GodotProject_rs {
     // current workaround is to call get_checked_out_branch_id every frame and check if has changed in GDScript
 
     fn checkout_branch(&mut self, branch_id: String) {
-        let branches_metadata = self.get_branches_metadata_doc();
+        todo!("not implemented");
+        // let branches_metadata = self.get_branches_metadata_doc();
 
-        let branch_doc_id = if branch_id == "main" {
-            DocumentId::from_str(&branches_metadata.main_doc_id).unwrap()
-        } else {
-            DocumentId::from_str(&branch_id).unwrap()
-        };
+        // let branch_doc_id = if branch_id == "main" {
+        //     DocumentId::from_str(&branches_metadata.main_doc_id).unwrap()
+        // } else {
+        //     DocumentId::from_str(&branch_id).unwrap()
+        // };
 
-        self.checked_out_branch_tx.unbounded_send(branch_doc_id);
+        // self.checked_out_branch_tx.unbounded_send(branch_doc_id);
     }
 
     fn get_branches(&self) -> Vec<String> /* { name: String, id: String }[] */ {
-        let branches_metadata = self.get_branches_metadata_doc();
+        todo!("not implemented");
 
-        let mut branches: Vec<String> = vec!("name".to_string(), "main".to_string(),  "id".to_string(), "main".to_string());
+        // let branches_metadata = self.get_branches_metadata_doc();
+
+        // let mut branches: Vec<String> = vec!("name".to_string(), "main".to_string(),  "id".to_string(), "main".to_string());
         
-        // Add other branches
-        for (id, branch) in branches_metadata.branches {
-            branches.push("name".to_string());
-            branches.push(branch.name);
-            branches.push("id".to_string());
-            branches.push(id);
-        }
+        // // Add other branches
+        // for (id, branch) in branches_metadata.branches {
+        //     branches.push("name".to_string());
+        //     branches.push(branch.name);
+        //     branches.push("id".to_string());
+        //     branches.push(id);
+        // }
 
-        branches
+        // branches
     }
 
     fn get_checked_out_branch_id(&self) -> String {
-        return self.checked_out_doc_id.to_string();
+        todo!("not implemented");
+        // return self.checked_out_doc_id.to_string();
     }
 
     // State api
 
     fn set_state_int (&self, entity_id: String, prop: String, value: i64) {
-        let checked_out_doc_handle = self.get_checked_out_doc_handle();
+        todo!("not implemented");
+        // // let checked_out_doc_handle = self.get_checked_out_doc_handle();
         
-        checked_out_doc_handle.with_doc_mut(|d| {
-            let mut tx = d.transaction();
-            let state = match tx.get_obj_id(ROOT, "state") {
-                Some(id) => id,
-                _ => {
-                    println!("failed to load state");
-                    return 
-                }
-            };
+        // checked_out_doc_handle.with_doc_mut(|d| {
+        //     let mut tx = d.transaction();
+        //     let state = match tx.get_obj_id(ROOT, "state") {
+        //         Some(id) => id,
+        //         _ => {
+        //             println!("failed to load state");
+        //             return 
+        //         }
+        //     };
 
 
-            match tx.get_obj_id(&state, &entity_id) {
-                Some(id) => {
-                    let _ = tx.put(id, prop, value);
-                },                
+        //     match tx.get_obj_id(&state, &entity_id) {
+        //         Some(id) => {
+        //             let _ = tx.put(id, prop, value);
+        //         },                
                 
-                None => {
-                    match tx.put_object(state, &entity_id, ObjType::Map) {
-                        Ok(id) => {
-                            let _ = tx.put(id, prop, value);
-                        },
-                        Err(e) => {
-                            println!("failed to create state object: {:?}", e);
-                        }
-                    }
-                }
-            }
+        //         None => {
+        //             match tx.put_object(state, &entity_id, ObjType::Map) {
+        //                 Ok(id) => {
+        //                     let _ = tx.put(id, prop, value);
+        //                 },
+        //                 Err(e) => {
+        //                     println!("failed to create state object: {:?}", e);
+        //                 }
+        //             }
+        //         }
+        //     }
         
-            tx.commit();        
-        });
+        //     tx.commit();        
+        // });
     }
 
     fn get_state_int (&self, entity_id: String, prop: String) -> Option<i64>  {
-        self.get_checked_out_doc_handle().with_doc(|checked_out_doc| {
+        todo!("not implemented");
 
-       let state  = match checked_out_doc.get_obj_id(ROOT, "state") {
-            Some(id) => id,
-            None => {
-                println!("invalid document, no state property");
-                return None
-            }
-        };
+    //     self.get_checked_out_doc_handle().with_doc(|checked_out_doc| {
 
-       let entity_id_clone = entity_id.clone();
-       let entity  = match checked_out_doc.get_obj_id(state, entity_id) {
-            Some(id) => id,
-            None => {
-                println!("entity {:?} does not exist", &entity_id_clone);
-                return None
-            }
-        };
+    //    let state  = match checked_out_doc.get_obj_id(ROOT, "state") {
+    //         Some(id) => id,
+    //         None => {
+    //             println!("invalid document, no state property");
+    //             return None
+    //         }
+    //     };
 
-        return match checked_out_doc.get_int(entity, prop) {
-            Some(value) => Some(value),
-            None =>  None
+    //    let entity_id_clone = entity_id.clone();
+    //    let entity  = match checked_out_doc.get_obj_id(state, entity_id) {
+    //         Some(id) => id,
+    //         None => {
+    //             println!("entity {:?} does not exist", &entity_id_clone);
+    //             return None
+    //         }
+    //     };
+
+    //     return match checked_out_doc.get_int(entity, prop) {
+    //         Some(value) => Some(value),
+    //         None =>  None
         
-        };
+    //     };
 
-    })
+    // })
     }
 
     // these functions below should be extracted into a separate SyncRepo class
@@ -567,208 +545,42 @@ impl GodotProject_rs {
     // needs to be called every frame to process the internal events
     // #[func]
     fn process(&mut self) {
-        // Process all pending sync events
-        while let Ok(event) = self.sync_event_receiver.try_recv() {
+
+        while let Ok(Some(event)) = self.driver_output_rx.try_next() {
             match event {
-                // this is internal, we don't pass this back to process
-                SyncEvent::NewDoc { doc_id: _doc_id, doc_handle: _doc_handle } => {}
-                SyncEvent::DocChanged { doc_id } => {
-                    println!("doc changed event {:?} {:?}", doc_id, self.checked_out_doc_id);
-                    // Check if branches metadata doc changed
-                    if doc_id == self.branches_metadata_doc_id  {                
-                        (self.signal_callback)(self.signal_user_data, BRANCHES_CHANGED.as_ptr(), std::ptr::null(), 0);
-                    } else if doc_id == self.checked_out_doc_id {
-                        (self.signal_callback)(self.signal_user_data, SIGNAL_FILES_CHANGED.as_ptr(), std::ptr::null(), 0);
-                    }
-                }
-
-                SyncEvent::CheckedOutBranch { doc_id} => {
-                    self.checked_out_doc_id = doc_id.clone();
-
-                    let doc_id_c_str = std::ffi::CString::new(format!("{}", doc_id)).unwrap();
-                    (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), &doc_id_c_str.as_ptr(), 1);
-                }
+                DriverOutputEvent::DocHandleChanged { doc_handle } => {
+                    self.doc_handles.insert(doc_handle.document_id(), doc_handle);                
+                },
+                DriverOutputEvent::BranchesUpdated { branches } => {
+                    self.branches = branches;
+                    (self.signal_callback)(self.signal_user_data, SIGNAL_BRANCHES_CHANGED.as_ptr(), std::ptr::null(), 0);
+                },
             }
         }
-    }
 
-    fn spawn_connection_task(runtime: &Runtime, repo_handle: RepoHandle) {
-        let repo_handle_clone = repo_handle.clone();
-        runtime.spawn(async move {
-            println!("start a client");
+        // // Process all pending sync events
+        // while let Ok(event) = self.sync_event_receiver.try_recv() {
+        //     match event {
+        //         // this is internal, we don't pass this back to process
+        //         SyncEvent::NewDoc { doc_id: _doc_id, doc_handle: _doc_handle } => {}
+        //         SyncEvent::DocChanged { doc_id } => {
+        //             println!("doc changed event {:?} {:?}", doc_id, self.checked_out_doc_id);
+        //             // Check if branches metadata doc changed
+        //             if doc_id == self.branches_metadata_doc_id  {                
+        //                 (self.signal_callback)(self.signal_user_data, BRANCHES_CHANGED.as_ptr(), std::ptr::null(), 0);
+        //             } else if doc_id == self.checked_out_doc_id {
+        //                 (self.signal_callback)(self.signal_user_data, SIGNAL_FILES_CHANGED.as_ptr(), std::ptr::null(), 0);
+        //             }
+        //         }
 
-            // Start a client.
-            let stream = loop {
-                // Try to connect to a peer
-                let res = TcpStream::connect(SERVER_URL).await;
-                if let Err(e) = res {
-                    println!("error connecting: {:?}", e);
-                    continue;
-                }
-                break res.unwrap();
-            };
+        //         SyncEvent::CheckedOutBranch { doc_id} => {
+        //             self.checked_out_doc_id = doc_id.clone();
 
-            println!("connect repo");
-
-            if let Err(e) = repo_handle_clone
-                .connect_tokio_io(SERVER_URL, stream, ConnDirection::Outgoing)
-                .await
-            {
-                println!("Failed to connect: {:?}", e);
-                return;
-            }
-
-            println!("connected successfully!");
-        });
-    }
-
-    fn spawn_sync_task(
-        runtime: &Runtime,
-        repo_handle: RepoHandle,
-        mut new_docs: futures::channel::mpsc::UnboundedReceiver<DocHandle>,
-        mut checked_out_branch: futures::channel::mpsc::UnboundedReceiver<DocumentId>,
-        doc_handle_map: DocHandleMap,
-        sync_event_sender: Sender<SyncEvent>,
-    ) {
-        let initial_handles = doc_handle_map
-            .current_handles();
-
-        runtime.spawn(async move {
-            // This is a stream of SyncEvent
-            let mut all_doc_changes = futures::stream::SelectAll::new();
-
-            // First add a stream for all the initial documents to the SelectAll
-            for doc_handle in initial_handles {
-                let doc_id = doc_handle.document_id();
-                let doc_handle = doc_handle.clone();
-
-                let change_stream = handle_changes(doc_handle.clone()).filter_map(move |diff| {
-                    let doc_id = doc_id.clone();
-                    async move {
-                        if diff.is_empty() {
-                            None
-                        } else {
-                            Some(SyncEvent::DocChanged { doc_id: doc_id.clone() } )
-                        }
-                    }
-                });
-
-                all_doc_changes.push(change_stream.boxed());
-            }
-
-            // Now, drive the SelectAll and also wait for any new documents to  arrive and add
-            // them to the selectall
-            loop {
-                futures::select! {
-                    sync_event = all_doc_changes.select_next_some() => {
-                        // emit change event
-                        sync_event_sender.send(sync_event).unwrap();                    
-                    }
-                    new_doc = new_docs.select_next_some() => {
-                        let doc_id = new_doc.document_id();
-                        let doc_handle = new_doc.clone();
-
-                        println!("new doc!!!");
-
-                        let change_stream = handle_changes(doc_handle.clone()).filter_map(move |diff| {
-                            let doc_id = doc_id.clone();
-                            async move {
-                                if diff.is_empty() {
-                                    None
-                                } else {
-                                    Some(SyncEvent::DocChanged { doc_id: doc_id.clone() } )
-                                }
-                            }
-                        });
-
-                        all_doc_changes.push(change_stream.boxed());
-                    }
-                    checked_out_branch_id = checked_out_branch.select_next_some() => {
-                        
-                        let doc_id = checked_out_branch_id.clone();
-            
-                        let branch_doc_handle = match repo_handle.request_document(checked_out_branch_id.clone()).await {
-                            Ok(doc_handle) => {
-                                doc_handle_map.add_handle(doc_handle.clone());
-                                doc_handle
-                            },
-                            Err(e) => {
-                                println!("failed to load branch doc {:?} {:?}", checked_out_branch_id, e);
-                                return;
-                            }            
-                        };
-
-                        let (linked_doc_requests_len, linked_doc_handles) = get_linked_docs(&repo_handle, &branch_doc_handle).await;
-            
-            
-                        if linked_doc_handles.len() != linked_doc_requests_len {
-                            println!("Couldn't check out branch {:?} because some linked docs couldn't be loaded", checked_out_branch_id);
-                            return;
-                        }
-                        
-                        for doc_handle in linked_doc_handles {
-                            doc_handle_map.add_handle(doc_handle.clone());
-                        }
-
-                        sync_event_sender.send(SyncEvent::CheckedOutBranch { doc_id: checked_out_branch_id.clone() }).unwrap();
-                    }
-                }
-            }
-        });
-    }
-
-    // DOC ACCESS + MANIPULATION
-
-    fn update_doc<F>(&self, doc_id: &DocumentId, f: F)
-    where
-        F: FnOnce(&mut Automerge),
-    {
-        if let Some(doc_handle) = self.doc_handle_map.get_handle(doc_id) {
-            doc_handle.with_doc_mut(f);
-        }
-    }
-
-    fn create_doc<F>(&self, f: F) -> DocumentId
-    where
-        F: FnOnce(&mut Automerge),
-    {
-        let doc_handle = self.repo_handle.new_document();
-        let doc_id = doc_handle.document_id();
-
-        self.doc_handle_map.add_handle(doc_handle.clone());
-
-        self.update_doc(&doc_id, f);
-
-        doc_id
-    }
-
-    fn clone_doc(&self, doc_id: DocumentId) -> DocumentId {
-        let new_doc_handle = self.repo_handle.new_document();
-        let new_doc_id = new_doc_handle.document_id();
-        let doc_handle = self.get_doc_handle(doc_id.clone());
-
-        let changes_count = doc_handle
-            .clone()
-            .unwrap()
-            .with_doc(|d| d.get_changes(&[]).len());
-
-        println!("changes {:?}", changes_count);
-
-        let doc_handle = doc_handle.unwrap_or_else(|| panic!("Couldn't clone doc_id: {}", &doc_id));
-        let _ = doc_handle
-            .with_doc_mut(|mut main_d| new_doc_handle.with_doc_mut(|d| d.merge(&mut main_d)));
-
-        self.doc_handle_map.add_handle(new_doc_handle.clone());
-
-        new_doc_id
-    }
-
-    fn get_doc(&self, id: DocumentId) -> Option<Automerge> {
-        self.doc_handle_map.get_doc(&id.into())
-    }
-
-    fn get_doc_handle(&self, id: DocumentId) -> Option<DocHandle> {
-        self.doc_handle_map.get_handle(&id.into())
+        //             let doc_id_c_str = std::ffi::CString::new(format!("{}", doc_id)).unwrap();
+        //             (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(), &doc_id_c_str.as_ptr(), 1);
+        //         }
+        //     }
+        // }
     }
 
 }

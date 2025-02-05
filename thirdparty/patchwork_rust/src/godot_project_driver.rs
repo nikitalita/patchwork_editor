@@ -10,12 +10,12 @@ use ::safer_ffi::prelude::*;
 
 use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, TextEncoding, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
-use autosurgeon::{bytes, hydrate, reconcile, Hydrate, Reconcile};
-use futures::{channel::mpsc::UnboundedSender, executor::block_on, FutureExt, StreamExt};
+use autosurgeon::{bytes, hydrate, reconcile, Hydrate, HydrateError, Reconcile};
+use futures::{channel::mpsc::{UnboundedReceiver, UnboundedSender}, executor::block_on, FutureExt, StreamExt};
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::os::raw::c_char;
-use crate::godot_project::get_linked_docs_of_branch;
+use crate::godot_project::{get_linked_docs_of_branch, BranchesMetadataDoc};
 
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
@@ -24,7 +24,8 @@ use crate::{doc_handle_map::DocHandleMap, doc_utils::SimpleDocReader, godot_proj
 
 const SERVER_URL: &str = "104.131.179.247:8080";
 
-enum DriverInputEvent {
+
+pub enum DriverInputEvent {
   InitBranchesMetadataDoc {
     doc_id: DocumentId,
   }, 
@@ -36,16 +37,16 @@ enum DriverInputEvent {
   }
 }
 
-enum DriverOutputEvent {
+pub enum DriverOutputEvent {
     DocHandleChanged {
         doc_handle: DocHandle,
     },
     BranchesUpdated {
-        branches: HashMap<DocumentId, String>,
+        branches: HashMap<String, Branch>,
     },
 }
 
-struct Driver {
+pub struct GodotProjectDriver {
     runtime: Runtime,
     repo_handle: RepoHandle,
 }
@@ -56,8 +57,8 @@ struct ProjectState {
     checked_out_doc_id: DocumentId,  
 }
 
-impl Driver {
-    fn create() -> Self {
+impl GodotProjectDriver {
+    pub fn create() -> Self {
         let runtime: Runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -75,7 +76,7 @@ impl Driver {
         };
     }
 
-    fn spawn(&self, rx: futures::channel::mpsc::UnboundedReceiver<DriverInputEvent>, tx: futures::channel::mpsc::UnboundedSender<DriverOutputEvent>) {
+    pub fn spawn(&self, rx: UnboundedReceiver<DriverInputEvent>, tx: UnboundedSender<DriverOutputEvent>) {
         // Spawn connection task
         self.spawn_connection_task();
 
@@ -114,16 +115,18 @@ impl Driver {
         });
     }
 
-    fn spawn_driver_task(&self, mut rx: futures::channel::mpsc::UnboundedReceiver<DriverInputEvent>, tx: futures::channel::mpsc::UnboundedSender<DriverOutputEvent>) {
+    fn spawn_driver_task(&self, mut rx: UnboundedReceiver<DriverInputEvent>, tx: UnboundedSender<DriverOutputEvent>) {
         let repo_handle = self.repo_handle.clone();
 
         self.runtime.spawn(async move {
-            // global state
+
             let mut state = DriverState {
               doc_handles: HashMap::new(),
               repo_handle,
-              state: None,
+              state: None,              
               tx: tx.clone(),
+              branches: HashMap::new(),
+              main_branch_doc_id: None,
             };
 
             let mut all_doc_changes =  futures::stream::SelectAll::new();
@@ -143,7 +146,16 @@ impl Driver {
                             DriverInputEvent::InitBranchesMetadataDoc { doc_id } => {
                               let doc_handle = state.request_document(&doc_id).await;
 
-                              // todo: load branches
+                              let branches_metadata : BranchesMetadataDoc = match doc_handle.with_doc(|d| hydrate(d)) {
+                                  Ok(branches_metadata) => branches_metadata,
+                                  Err(e) => {
+                                    println!("failed to load branches metadata doc: {:?}", e);
+                                    return;
+                                  }
+                              };
+
+                              state.set_main_branch_doc_id(DocumentId::from_str(&branches_metadata.main_doc_id).unwrap());
+                              state.set_branches(&branches_metadata.branches);
                             }
 
                             DriverInputEvent::NewDocHandle { doc_handle } => {
@@ -195,7 +207,9 @@ struct DriverState {
     doc_handles: HashMap<DocumentId, DocHandle>,
     repo_handle: RepoHandle,
     state: Option<ProjectState>,
-    tx: futures::channel::mpsc::UnboundedSender<DriverOutputEvent>,
+    branches: HashMap<String, Branch>,
+    main_branch_doc_id: Option<DocumentId>,
+    tx: UnboundedSender<DriverOutputEvent>,
 }
 
 impl DriverState {
@@ -216,6 +230,15 @@ impl DriverState {
 
 
         self.tx.unbounded_send(DriverOutputEvent::DocHandleChanged { doc_handle: doc_handle.clone() }).unwrap();      
+    }
+
+    fn set_main_branch_doc_id(&mut self, doc_id: DocumentId) {
+        self.main_branch_doc_id = Some(doc_id);        
+    }
+
+    fn set_branches(&mut self, branches: &HashMap<String, Branch>) {
+        self.branches = branches.clone();
+        self.tx.unbounded_send(DriverOutputEvent::BranchesUpdated { branches: branches.clone() }).unwrap();
     }
 }
 
@@ -238,3 +261,5 @@ fn handle_changes(handle: DocHandle) -> impl futures::Stream<Item = Vec<automerg
         Some((diff, doc_handle))
     })
 }
+
+
