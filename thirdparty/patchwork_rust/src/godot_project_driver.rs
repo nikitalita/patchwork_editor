@@ -15,7 +15,7 @@ use futures::{channel::mpsc::{UnboundedReceiver, UnboundedSender}, executor::blo
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::os::raw::c_char;
-use crate::{godot_project::BranchesMetadataDoc, utils::get_linked_docs_of_branch};
+use crate::{godot_project::{BranchesMetadataDoc, GodotProjectDoc}, utils::get_linked_docs_of_branch};
 
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
@@ -27,7 +27,7 @@ const SERVER_URL: &str = "104.131.179.247:8080";
 
 pub enum DriverInputEvent {
   InitBranchesMetadataDoc {
-    doc_id: DocumentId,
+    doc_id: Option<DocumentId>,
   }, 
 
   CheckoutBranch {
@@ -150,24 +150,69 @@ impl GodotProjectDriver {
                     message = rx.select_next_some() => {
                         match message {
                             DriverInputEvent::InitBranchesMetadataDoc { doc_id } => {
-                              let doc_handle = match state.request_document(&doc_id).await {
-                                  Ok(doc_handle) => doc_handle,
-                                  Err(e) => {
-                                    println!("failed to load branches metadata doc: {:?}", e);
-                                    return;
-                                  }
-                              };                                        
+                                match doc_id {
+                                    Some(doc_id) => {
+                                        let doc_handle = match state.request_document(&doc_id).await {
+                                            Ok(doc_handle) => doc_handle,
+                                            Err(e) => {
+                                            println!("failed to load branches metadata doc: {:?}", e);
+                                            return;
+                                            }
+                                        };                                        
+        
+                                        let branches_metadata : BranchesMetadataDoc = match doc_handle.with_doc(|d| hydrate(d)) {
+                                            Ok(branches_metadata) => branches_metadata,
+                                            Err(e) => {
+                                            println!("failed to load branches metadata doc: {:?}", e);
+                                            return;
+                                            }
+                                        };
+        
+                                        state.set_main_branch_doc_id(DocumentId::from_str(&branches_metadata.main_doc_id).unwrap());
+                                        state.set_branches(&branches_metadata.branches);
+                                    }
 
-                              let branches_metadata : BranchesMetadataDoc = match doc_handle.with_doc(|d| hydrate(d)) {
-                                  Ok(branches_metadata) => branches_metadata,
-                                  Err(e) => {
-                                    println!("failed to load branches metadata doc: {:?}", e);
-                                    return;
-                                  }
-                              };
+                                    None => {                                    
+                                        // Create new main branch doc
+                                        let main_branch_doc_handle = state.new_document();
+                                        main_branch_doc_handle.with_doc_mut(|d| {
+                                            let mut tx = d.transaction();
+                                            let _ = reconcile(
+                                                &mut tx,
+                                                GodotProjectDoc {
+                                                    files: HashMap::new(),
+                                                    state: HashMap::new()
+                                                },
+                                            );
+                                            tx.commit();
+                                        });
+                                    
+                                        let main_branch_doc_id = main_branch_doc_handle.document_id().to_string();
+                                        let main_branch_doc_id_clone = main_branch_doc_id.clone();
+                                        let branches =  HashMap::from([
+                                                (main_branch_doc_id,  Branch { name: String::from("main"), id: main_branch_doc_handle.document_id().to_string(), is_merged: true })                                                    
+                                            ]);
+                                        let branches_clone = branches.clone();
+                                        
+                                        // create new branches metadata doc
+                                        let branches_metadata_doc_handle = state.new_document();
+                                        branches_metadata_doc_handle.with_doc_mut(|d| {
+                                            let mut tx = d.transaction();
+                                            let _ = reconcile(
+                                                &mut tx,
+                                                BranchesMetadataDoc {
+                                                    main_doc_id: main_branch_doc_id_clone,
+                                                    branches: branches_clone
+                                                },
+                                            );
+                                            tx.commit();
+                                        });                                        
 
-                              state.set_main_branch_doc_id(DocumentId::from_str(&branches_metadata.main_doc_id).unwrap());
-                              state.set_branches(&branches_metadata.branches);
+
+                                        state.set_main_branch_doc_id(main_branch_doc_handle.document_id());
+                                        state.set_branches(&branches);
+                                    }
+                                }                            
                             }
 
                             DriverInputEvent::CheckoutBranch { branch_doc_id } => {
@@ -257,6 +302,16 @@ struct DriverState {
 }
 
 impl DriverState {
+
+    fn new_document(&mut self) -> DocHandle {
+        let doc_handle = self.repo_handle.new_document();
+
+        self.add_handle(doc_handle.clone());
+        self.tx.unbounded_send(DriverOutputEvent::DocHandleChanged { doc_handle: doc_handle.clone() }).unwrap();
+
+        doc_handle
+    }
+
     async fn request_document(&mut self, doc_id: &DocumentId) -> Result<DocHandle, RepoError> {                
         if let Some(doc_handle) = self.doc_handles.get(doc_id) {
             return Ok(doc_handle.clone());
