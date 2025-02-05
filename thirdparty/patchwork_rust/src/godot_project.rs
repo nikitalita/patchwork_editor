@@ -80,6 +80,7 @@ struct GodotProjectState {
 pub struct GodotProject_rs {
     branches: HashMap<String, Branch>,
     doc_handles: HashMap<DocumentId, DocHandle>,
+    checked_out_branch_doc_id: Option<DocumentId>,
     signal_user_data: *mut c_void,
     signal_callback: AutoMergeSignalCallback,
     driver: GodotProjectDriver,
@@ -145,6 +146,7 @@ impl GodotProject_rs {
         GodotProject_rs {
             branches: HashMap::new(),
             doc_handles: HashMap::new(),
+            checked_out_branch_doc_id: None,
             signal_user_data,
             signal_callback,
             driver,
@@ -160,26 +162,20 @@ impl GodotProject_rs {
       // todo
     }
 
-
-    fn get_branches_metadata_doc_handle(&self) -> DocHandle {  
-        todo!("not implemented");
-        // match self.doc_handle_map.get_handle(&self.branches_metadata_doc_id) {
-        //     Some(doc_handle) => doc_handle,
-        //     None => panic!("project is not initialized properly, can't load branches metadata doc handle"),
-        // }
+    fn get_checked_out_branch_handle (&self) -> Option<DocHandle>  {
+        match self.checked_out_branch_doc_id.clone() {
+            Some(checked_out_branch_doc_id) => {
+               self.doc_handles.get(&checked_out_branch_doc_id).cloned()
+            }
+            None => {
+                println!("warning: tried to access checked out doc when no branch was checked out");
+                return None
+            }
+        }
     }
 
-    fn get_branches_metadata_doc(&self) -> BranchesMetadataDoc {    
-        todo!("not implemented");
-        // self.get_branches_metadata_doc_handle().with_doc(|d| hydrate(d).unwrap())
-    }
-
-    fn get_checked_out_doc_handle(&self) -> DocHandle {    
-        todo!("not implemented");
-        // match self.doc_handle_map.get_handle(&self.checked_out_doc_id) {
-        //     Some(doc_handle) => doc_handle,
-        //     None => panic!("project is not initialized properly, can't load checked out doc"),
-        // }
+    fn get_checked_out_branch_doc (&self) -> Option<Automerge>  {
+        self.get_checked_out_branch_handle().map(|doc_handle| doc_handle.with_doc(|d| d.clone()))
     }
 
     // #[func]
@@ -200,20 +196,19 @@ impl GodotProject_rs {
         // })
     }
 
-
     fn list_all_files(&self) -> Vec<String> {
-        todo!("not implemented");
-    //     self.get_checked_out_doc_handle().with_doc(|doc| {
+        let doc = match self.get_checked_out_branch_doc() {
+            Some(doc) => doc,
+            None => return vec![]
+        };
 
-    //     let files = match doc.get_obj_id(ROOT, "files") {
-    //         Some(files) => files,
-    //         _ => {
-    //             return vec![];
-    //         }
-    //     };
-    //     doc.keys(files).collect::<Vec<String>>()
-
-    // })
+        let files = match doc.get_obj_id(ROOT, "files") {
+            Some(files) => files,
+            _ => {
+                return vec![];
+            }
+        };
+        doc.keys(files).collect::<Vec<String>>()
     }
 
     fn get_file(&self, path: String) -> Option<StringOrPackedByteArray> {
@@ -433,17 +428,16 @@ impl GodotProject_rs {
     // 
     // current workaround is to call get_checked_out_branch_id every frame and check if has changed in GDScript
 
-    fn checkout_branch(&mut self, branch_id: String) {
-        todo!("not implemented");
-        // let branches_metadata = self.get_branches_metadata_doc();
+    fn checkout_branch(&mut self, branch_doc_id: String) {
+        let branch_doc_id = match DocumentId::from_str(&branch_doc_id) {
+            Ok(id) => id,
+            Err(e) => {
+                println!("invalid branch doc id: {:?}", e);
+                return;
+            }
+        };
 
-        // let branch_doc_id = if branch_id == "main" {
-        //     DocumentId::from_str(&branches_metadata.main_doc_id).unwrap()
-        // } else {
-        //     DocumentId::from_str(&branch_id).unwrap()
-        // };
-
-        // self.checked_out_branch_tx.unbounded_send(branch_doc_id);
+        self.driver_input_tx.unbounded_send(DriverInputEvent::CheckoutBranch { branch_doc_id }).unwrap();
     }
 
     fn get_branches(&self) -> Vec<String> /* { name: String, id: String }[] */ {
@@ -548,6 +542,11 @@ impl GodotProject_rs {
                     self.branches = branches;
                     (self.signal_callback)(self.signal_user_data, SIGNAL_BRANCHES_CHANGED.as_ptr(), std::ptr::null(), 0);
                 },
+                DriverOutputEvent::CheckedOutBranch { branch_doc_id } => {
+                    self.checked_out_branch_doc_id = Some(branch_doc_id.clone());
+                    let doc_id_c_str = std::ffi::CString::new(format!("{}", &branch_doc_id)).unwrap();
+                    (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(),  &doc_id_c_str.as_ptr(), 1);
+                },
             }
         }
 
@@ -596,172 +595,162 @@ fn handle_changes(handle: DocHandle) -> impl futures::Stream<Item = Vec<automerg
 }
 
 
-fn parse_automerge_url(url: &str) -> Option<DocumentId> {
-    const PREFIX: &str = "automerge:";
-    if !url.starts_with(PREFIX) {
-        return None;
-    }
-
-    let hash = &url[PREFIX.len()..];
-    DocumentId::from_str(hash).ok()
-}
-
 // return a tuple of the linked_doc_requests_len and linked_doc_handles
-pub(crate) async fn get_linked_docs(repo_handle: &RepoHandle, branch_doc_handle: &DocHandle) -> (usize, Vec<DocHandle>) {
-    let linked_doc_requests = get_linked_docs_of_branch(&branch_doc_handle).into_iter().map(|doc_id| {
-        (doc_id.clone(), repo_handle.request_document(doc_id))
-    }).collect::<Vec<_>>();
+// pub(crate) async fn get_linked_docs(repo_handle: &RepoHandle, branch_doc_handle: &DocHandle) -> (usize, Vec<DocHandle>) {
+//     let linked_doc_requests = get_linked_docs_of_branch(&branch_doc_handle).into_iter().map(|doc_id| {
+//         (doc_id.clone(), repo_handle.request_document(doc_id))
+//     }).collect::<Vec<_>>();
 
-    let linked_doc_requests_len = linked_doc_requests.len();
+//     let linked_doc_requests_len = linked_doc_requests.len();
 
-    let linked_doc_handles = futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
-        future.map(move |result| {
-            match result {
-                Ok(handle) => Some(handle),
-                Err(e) => {
-                    println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
-                    None
-                }
-            }
-        })
-    })).await.into_iter().flatten().collect::<Vec<_>>();
+//     let linked_doc_handles = futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
+//         future.map(move |result| {
+//             match result {
+//                 Ok(handle) => Some(handle),
+//                 Err(e) => {
+//                     println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
+//                     None
+//                 }
+//             }
+//         })
+//     })).await.into_iter().flatten().collect::<Vec<_>>();
 
-    (linked_doc_requests_len, linked_doc_handles)
-}
+//     (linked_doc_requests_len, linked_doc_handles)
+// }
 
-async fn init_godot_project_state(repo_handle: &RepoHandle, doc_handle_map: DocHandleMap, maybe_branches_metadata_doc_id: Option<DocumentId>) -> (DocumentId, DocumentId) {
-    match maybe_branches_metadata_doc_id {
-        None => {
-            // Create new project doc
-            let project_doc_handle = repo_handle.new_document();
-            project_doc_handle.with_doc_mut(|d| {
-                let mut tx = d.transaction();
-                let _ = reconcile(
-                    &mut tx,
-                    GodotProjectDoc {
-                        files: HashMap::new(),
-                        state: HashMap::new()
-                    },
-                );
-                tx.commit();
-            });
-            let main_branch_doc_id = project_doc_handle.document_id();
+// async fn init_godot_project_state(repo_handle: &RepoHandle, doc_handle_map: DocHandleMap, maybe_branches_metadata_doc_id: Option<DocumentId>) -> (DocumentId, DocumentId) {
+//     match maybe_branches_metadata_doc_id {
+//         None => {
+//             // Create new project doc
+//             let project_doc_handle = repo_handle.new_document();
+//             project_doc_handle.with_doc_mut(|d| {
+//                 let mut tx = d.transaction();
+//                 let _ = reconcile(
+//                     &mut tx,
+//                     GodotProjectDoc {
+//                         files: HashMap::new(),
+//                         state: HashMap::new()
+//                     },
+//                 );
+//                 tx.commit();
+//             });
+//             let main_branch_doc_id = project_doc_handle.document_id();
 
-            // Create new branches metadata doc
-            let branches_metadata_doc_handle = repo_handle.new_document();
-            branches_metadata_doc_handle.with_doc_mut(|d| {
-                let mut tx = d.transaction();
-                let _ = reconcile(
-                    &mut tx,
-                    BranchesMetadataDoc {
-                        main_doc_id: main_branch_doc_id.to_string(),
-                        branches: HashMap::new(),
-                    },
-                );
-                tx.commit();
-            });
+//             // Create new branches metadata doc
+//             let branches_metadata_doc_handle = repo_handle.new_document();
+//             branches_metadata_doc_handle.with_doc_mut(|d| {
+//                 let mut tx = d.transaction();
+//                 let _ = reconcile(
+//                     &mut tx,
+//                     BranchesMetadataDoc {
+//                         main_doc_id: main_branch_doc_id.to_string(),
+//                         branches: HashMap::new(),
+//                     },
+//                 );
+//                 tx.commit();
+//             });
 
-            let branches_metadata_doc_handle_clone = branches_metadata_doc_handle.clone();
+//             let branches_metadata_doc_handle_clone = branches_metadata_doc_handle.clone();
 
-            // save doc handles to the doc_handle_map
-            {
-                doc_handle_map.add_handle(project_doc_handle.clone());
-                doc_handle_map.add_handle(branches_metadata_doc_handle.clone());
-            }
+//             // save doc handles to the doc_handle_map
+//             {
+//                 doc_handle_map.add_handle(project_doc_handle.clone());
+//                 doc_handle_map.add_handle(branches_metadata_doc_handle.clone());
+//             }
 
-            return (main_branch_doc_id, branches_metadata_doc_handle_clone.document_id());        
+//             return (main_branch_doc_id, branches_metadata_doc_handle_clone.document_id());        
             
-        },
+//         },
 
-        Some(branches_metadata_doc_id) => {
-            let repo_handle_clone = repo_handle.clone();
-            let branches_metadata_doc_id_clone = branches_metadata_doc_id.clone();
+//         Some(branches_metadata_doc_id) => {
+//             let repo_handle_clone = repo_handle.clone();
+//             let branches_metadata_doc_id_clone = branches_metadata_doc_id.clone();
 
-            let branches_metadata_doc_handle = repo_handle_clone
-                .request_document(branches_metadata_doc_id)
-                .await
-                .unwrap();
+//             let branches_metadata_doc_handle = repo_handle_clone
+//                 .request_document(branches_metadata_doc_id)
+//                 .await
+//                 .unwrap();
 
-            let branches_metadata: BranchesMetadataDoc =
-                branches_metadata_doc_handle.with_doc(|d| hydrate(d).unwrap());
+//             let branches_metadata: BranchesMetadataDoc =
+//                 branches_metadata_doc_handle.with_doc(|d| hydrate(d).unwrap());
             
-            load_new_branch_docs(&branches_metadata, &repo_handle_clone, &doc_handle_map).await;
+//             load_new_branch_docs(&branches_metadata, &repo_handle_clone, &doc_handle_map).await;
 
-            doc_handle_map.add_handle(branches_metadata_doc_handle.clone());
+//             doc_handle_map.add_handle(branches_metadata_doc_handle.clone());
 
-            let main_branch_doc_id = DocumentId::from_str(&branches_metadata.main_doc_id).unwrap();
-            return (main_branch_doc_id, branches_metadata_doc_id_clone);        
-        }
-    }
-}
+//             let main_branch_doc_id = DocumentId::from_str(&branches_metadata.main_doc_id).unwrap();
+//             return (main_branch_doc_id, branches_metadata_doc_id_clone);        
+//         }
+//     }
+// }
 
-async fn load_new_branch_docs (branches_metadata: &BranchesMetadataDoc, repo_handle: &RepoHandle, doc_handle_map: &DocHandleMap) {        
-    let mut new_branch_doc_ids = branches_metadata.branches.keys().filter_map(|branch_id| {
-       let branch_doc_id = DocumentId::from_str(branch_id).unwrap();
-       match doc_handle_map.get_handle(&branch_doc_id) {
-           Some(_) => None, // ignore branches we already have
-           None => Some(branch_doc_id)    
-       }
-    }).collect::<Vec<_>>();
+// async fn load_new_branch_docs (branches_metadata: &BranchesMetadataDoc, repo_handle: &RepoHandle, doc_handle_map: &DocHandleMap) {        
+//     let mut new_branch_doc_ids = branches_metadata.branches.keys().filter_map(|branch_id| {
+//        let branch_doc_id = DocumentId::from_str(branch_id).unwrap();
+//        match doc_handle_map.get_handle(&branch_doc_id) {
+//            Some(_) => None, // ignore branches we already have
+//            None => Some(branch_doc_id)    
+//        }
+//     }).collect::<Vec<_>>();
 
-    // do we need to load the main branch doc?
-    if doc_handle_map.get_handle(&DocumentId::from_str(&branches_metadata.main_doc_id).unwrap()).is_none() {
-        new_branch_doc_ids.push(DocumentId::from_str(&branches_metadata.main_doc_id).unwrap());
-    }
+//     // do we need to load the main branch doc?
+//     if doc_handle_map.get_handle(&DocumentId::from_str(&branches_metadata.main_doc_id).unwrap()).is_none() {
+//         new_branch_doc_ids.push(DocumentId::from_str(&branches_metadata.main_doc_id).unwrap());
+//     }
 
-    let new_branch_doc_handles = futures::future::join_all(
-        new_branch_doc_ids.iter().map(|doc_id| {
-            repo_handle.request_document(doc_id.clone()).map(move |result| {
-                match result {
-                    Ok(handle) => Some(handle.clone()),
-                    Err(e) => {
-                        println!("Failed to load branch doc {:?}: {:?}", doc_id.clone(), e);
-                        None
-                    }
-                }    
-            })       
-        })
-    ).await.into_iter().flatten();
-   let new_branch_doc_handles_clone = new_branch_doc_handles.clone();
+//     let new_branch_doc_handles = futures::future::join_all(
+//         new_branch_doc_ids.iter().map(|doc_id| {
+//             repo_handle.request_document(doc_id.clone()).map(move |result| {
+//                 match result {
+//                     Ok(handle) => Some(handle.clone()),
+//                     Err(e) => {
+//                         println!("Failed to load branch doc {:?}: {:?}", doc_id.clone(), e);
+//                         None
+//                     }
+//                 }    
+//             })       
+//         })
+//     ).await.into_iter().flatten();
+//    let new_branch_doc_handles_clone = new_branch_doc_handles.clone();
 
-   // Process branch docs to find and request linked documents, then load them in parallel
-   let linked_doc_handles: Vec<DocHandle> = {
-       // First collect all document requests from each branch
-       let linked_doc_requests = new_branch_doc_handles_clone.flat_map(|branch_doc_handle| {                                
-           branch_doc_handle.with_doc(|d| {
-               get_linked_docs_of_branch(&branch_doc_handle)
-                   .into_iter().map(|doc_id| {
-                       (doc_id.clone(), repo_handle.request_document(doc_id))
-                   }).collect::<Vec<_>>()
-           })
-       }).collect::<Vec<_>>();
+//    // Process branch docs to find and request linked documents, then load them in parallel
+//    let linked_doc_handles: Vec<DocHandle> = {
+//        // First collect all document requests from each branch
+//        let linked_doc_requests = new_branch_doc_handles_clone.flat_map(|branch_doc_handle| {                                
+//            branch_doc_handle.with_doc(|d| {
+//                get_linked_docs_of_branch(&branch_doc_handle)
+//                    .into_iter().map(|doc_id| {
+//                        (doc_id.clone(), repo_handle.request_document(doc_id))
+//                    }).collect::<Vec<_>>()
+//            })
+//        }).collect::<Vec<_>>();
 
-       // Execute all requests in parallel and filter out failures
-       futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
-           future.map(move |result| {
-               match result {
-                   Ok(handle) => Some(handle),
-                   Err(e) => {
-                       println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
-                       None
-                   }
-               }
-           })
-       }))
-       .await
-       .into_iter()
-       .flatten()
-       .collect()                    
-   };                        
+//        // Execute all requests in parallel and filter out failures
+//        futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
+//            future.map(move |result| {
+//                match result {
+//                    Ok(handle) => Some(handle),
+//                    Err(e) => {
+//                        println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
+//                        None
+//                    }
+//                }
+//            })
+//        }))
+//        .await
+//        .into_iter()
+//        .flatten()
+//        .collect()                    
+//    };                        
 
-   // Add all handles to the doc_handle_map
-   for handle in new_branch_doc_handles {
-       doc_handle_map.add_handle(handle);
-   }
-   for handle in linked_doc_handles {
-       doc_handle_map.add_handle(handle);
-   }
-}
+//    // Add all handles to the doc_handle_map
+//    for handle in new_branch_doc_handles {
+//        doc_handle_map.add_handle(handle);
+//    }
+//    for handle in linked_doc_handles {
+//        doc_handle_map.add_handle(handle);
+//    }
+// }
 
 pub(crate) fn is_branch_doc(branch_doc_handle: &DocHandle) -> bool {
     branch_doc_handle.with_doc(|d| {
@@ -770,41 +759,6 @@ pub(crate) fn is_branch_doc(branch_doc_handle: &DocHandle) -> bool {
             None => false,
         }
     })
-}
-
-// mark this for export
-pub(crate) fn get_linked_docs_of_branch(branch_doc_handle: &DocHandle) -> Vec<DocumentId> {
-    // Collect all linked doc IDs from this branch
-    branch_doc_handle.with_doc(|d| {
-        let files = match d.get_obj_id(ROOT, "files") {
-            Some(files) => files,
-            None => {
-                println!("Failed to load files for branch doc {:?}", branch_doc_handle.document_id());
-                return vec![];
-            }
-        };
-
-        d.keys(&files)
-            .filter_map(|path| {
-                let file = match d.get_obj_id(&files, &path) {
-                    Some(file) => file,
-                    None => {
-                        println!("Failed to load linked doc {:?}", path);
-                        return None;
-                    }
-                };
-
-                let url = match d.get_string(&file, "url") {
-                    Some(url) => url,
-                    None => {
-                        return None;
-                    }
-                };
-
-                parse_automerge_url(&url)
-            })
-            .collect::<Vec<_>>()
-    })  
 }
 
 // C FFI functions for GodotProject

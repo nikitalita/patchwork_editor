@@ -3,3 +3,4 @@ mod doc_utils;
 mod godot_project;
 mod godot_scene;
 mod godot_project_driver;
+mod utils;

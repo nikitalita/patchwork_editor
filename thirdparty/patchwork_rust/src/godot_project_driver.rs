@@ -9,13 +9,13 @@ use std::env::var;
 use ::safer_ffi::prelude::*;
 
 use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, TextEncoding, ROOT};
-use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoHandle};
+use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoError, RepoHandle};
 use autosurgeon::{bytes, hydrate, reconcile, Hydrate, HydrateError, Reconcile};
 use futures::{channel::mpsc::{UnboundedReceiver, UnboundedSender}, executor::block_on, FutureExt, StreamExt};
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::os::raw::c_char;
-use crate::godot_project::{get_linked_docs_of_branch, BranchesMetadataDoc};
+use crate::{godot_project::BranchesMetadataDoc, utils::get_linked_docs_of_branch};
 
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
@@ -30,6 +30,9 @@ pub enum DriverInputEvent {
     doc_id: DocumentId,
   }, 
 
+  CheckoutBranch {
+    branch_doc_id: DocumentId,
+  },
 
   // only trigger this event internally in the driver
   NewDocHandle {
@@ -43,6 +46,9 @@ pub enum DriverOutputEvent {
     },
     BranchesUpdated {
         branches: HashMap<String, Branch>,
+    },
+    CheckedOutBranch {
+        branch_doc_id: DocumentId,
     },
 }
 
@@ -123,10 +129,10 @@ impl GodotProjectDriver {
             let mut state = DriverState {
               doc_handles: HashMap::new(),
               repo_handle,
-              state: None,              
               tx: tx.clone(),
               branches: HashMap::new(),
               main_branch_doc_id: None,
+              checked_out_doc_id: None,
             };
 
             let mut all_doc_changes =  futures::stream::SelectAll::new();
@@ -144,7 +150,13 @@ impl GodotProjectDriver {
                     message = rx.select_next_some() => {
                         match message {
                             DriverInputEvent::InitBranchesMetadataDoc { doc_id } => {
-                              let doc_handle = state.request_document(&doc_id).await;
+                              let doc_handle = match state.request_document(&doc_id).await {
+                                  Ok(doc_handle) => doc_handle,
+                                  Err(e) => {
+                                    println!("failed to load branches metadata doc: {:?}", e);
+                                    return;
+                                  }
+                              };                                        
 
                               let branches_metadata : BranchesMetadataDoc = match doc_handle.with_doc(|d| hydrate(d)) {
                                   Ok(branches_metadata) => branches_metadata,
@@ -158,11 +170,43 @@ impl GodotProjectDriver {
                               state.set_branches(&branches_metadata.branches);
                             }
 
+                            DriverInputEvent::CheckoutBranch { branch_doc_id } => {
+                              let branch_doc_handle = match state.request_document(&branch_doc_id).await {
+                                  Ok(doc_handle) => doc_handle,
+                                  Err(e) => {
+                                    println!("failed to load branch doc: {:?}", e);
+                                    return;
+                                  },
+                              };                                        
+
+                              let linked_doc_ids = get_linked_docs_of_branch(&branch_doc_handle);
+
+                              // @alex
+                              // todo: do this in parallel
+                              let mut linked_doc_results = Vec::new();
+                              for doc_id in linked_doc_ids {
+                                  let result = state.request_document(&doc_id).await;
+                                  linked_doc_results.push(result);
+                              }                
+
+                              if linked_doc_results.iter().any(|result| result.is_err()) {
+                                  println!("failed to checkout branch, some linked docs are missing:");
+
+                                  for result in linked_doc_results {
+                                    if let Err(e) = result {
+                                      println!("{:?}", e);
+                                    }
+                                  }
+                                  return;
+                              }
+
+                              state.set_checked_out_branch_doc_id(branch_doc_id);
+                            },
+
                             DriverInputEvent::NewDocHandle { doc_handle } => {
                                 let change_stream = handle_changes(doc_handle.clone()).filter_map(move |diff| {
 
                                   // trigger the load all binary files
-
 
                                   let doc_handle = doc_handle.clone();
                                   async move {
@@ -206,19 +250,29 @@ struct DocHandleWithType {
 struct DriverState {
     doc_handles: HashMap<DocumentId, DocHandle>,
     repo_handle: RepoHandle,
-    state: Option<ProjectState>,
     branches: HashMap<String, Branch>,
     main_branch_doc_id: Option<DocumentId>,
+    checked_out_doc_id: Option<DocumentId>,
     tx: UnboundedSender<DriverOutputEvent>,
 }
 
 impl DriverState {
-    async fn request_document(&mut self, doc_id: &DocumentId) -> DocHandle {
-        let doc_handle = self.repo_handle.request_document(doc_id.clone()).await.unwrap();
+    async fn request_document(&mut self, doc_id: &DocumentId) -> Result<DocHandle, RepoError> {                
+        if let Some(doc_handle) = self.doc_handles.get(doc_id) {
+            return Ok(doc_handle.clone());
+        }
+
+        let doc_handle = match self.repo_handle.request_document(doc_id.clone()).await {
+            Ok(handle) => handle,
+            Err(e) => {
+                return Err(e);
+            }
+        };
 
         self.add_handle(doc_handle.clone());
+        self.tx.unbounded_send(DriverOutputEvent::DocHandleChanged { doc_handle: doc_handle.clone() }).unwrap();
 
-        doc_handle
+        Ok(doc_handle)
     }
 
     fn add_handle(&mut self, doc_handle: DocHandle) {
@@ -239,6 +293,13 @@ impl DriverState {
     fn set_branches(&mut self, branches: &HashMap<String, Branch>) {
         self.branches = branches.clone();
         self.tx.unbounded_send(DriverOutputEvent::BranchesUpdated { branches: branches.clone() }).unwrap();
+    }
+
+    // set checked out doc id should be only called once we made sure that all the binary files are loaded
+    // todo: is there a better way to do this that is less error prone?
+    fn set_checked_out_branch_doc_id(&mut self, doc_id: DocumentId) {
+        self.checked_out_doc_id = Some(doc_id.clone());
+        self.tx.unbounded_send(DriverOutputEvent::CheckedOutBranch { branch_doc_id: doc_id.clone() }).unwrap();
     }
 }
 
