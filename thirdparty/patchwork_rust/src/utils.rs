@@ -4,7 +4,6 @@ use automerge::{ReadDoc, ROOT};
 use automerge_repo::{DocHandle, DocumentId};
 use crate::doc_utils::SimpleDocReader;
 
-// mark this for export
 pub(crate) fn get_linked_docs_of_branch(branch_doc_handle: &DocHandle) -> Vec<DocumentId> {
   // Collect all linked doc IDs from this branch
   branch_doc_handle.with_doc(|d| {

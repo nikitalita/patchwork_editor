@@ -10,17 +10,17 @@ use ::safer_ffi::prelude::*;
 
 use automerge::{patches::TextRepresentation, transaction::Transactable, Automerge, Change, ChangeHash, ObjType, PatchLog, ReadDoc, TextEncoding, ROOT};
 use automerge_repo::{tokio::FsStorage, ConnDirection, DocHandle, DocumentId, Repo, RepoError, RepoHandle};
-use autosurgeon::{bytes, hydrate, reconcile, Hydrate, HydrateError, Reconcile};
+use autosurgeon::{bytes, hydrate, reconcile, Doc, Hydrate, HydrateError, Reconcile};
 use futures::{channel::mpsc::{UnboundedReceiver, UnboundedSender}, executor::block_on, FutureExt, StreamExt};
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::os::raw::c_char;
-use crate::{godot_project::{BranchesMetadataDoc, GodotProjectDoc}, utils::get_linked_docs_of_branch};
+use crate::{doc_handle_map::DocHandleMap, godot_project::{BranchesMetadataDoc, GodotProjectDoc}, utils::get_linked_docs_of_branch};
 
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
 
-use crate::{doc_handle_map::DocHandleMap, doc_utils::SimpleDocReader, godot_project::Branch};
+use crate::{ doc_utils::SimpleDocReader, godot_project::Branch};
 
 const SERVER_URL: &str = "104.131.179.247:8080";
 
@@ -32,6 +32,10 @@ pub enum DriverInputEvent {
 
   CheckoutBranch {
     branch_doc_id: DocumentId,
+  },
+
+  CreateBranch {
+    name: String
   },
 
   // only trigger this event internally in the driver
@@ -58,11 +62,6 @@ pub struct GodotProjectDriver {
     repo_handle: RepoHandle,
 }
 
-struct ProjectState {
-    main_branch_doc_id: DocumentId,
-    branches: HashMap<DocumentId, Branch>,
-    checked_out_doc_id: DocumentId,  
-}
 
 impl GodotProjectDriver {
     pub fn create() -> Self {
@@ -128,12 +127,13 @@ impl GodotProjectDriver {
         self.runtime.spawn(async move {
 
             let mut state = DriverState {
-              doc_handles: HashMap::new(),
-              repo_handle,
-              tx: tx.clone(),
-              branches: HashMap::new(),
-              main_branch_doc_id: None,
-              checked_out_doc_id: None,
+              repo: RepoState {
+                repo_handle,
+                doc_handles: HashMap::new(),
+                tx: tx.clone()
+             },
+              project: None,
+              tx: tx.clone()
             };
 
             let mut all_doc_changes =  futures::stream::SelectAll::new();
@@ -150,105 +150,16 @@ impl GodotProjectDriver {
 
                     message = rx.select_next_some() => {
                         match message {
-                            DriverInputEvent::InitBranchesMetadataDoc { doc_id } => {
-                                match doc_id {
-                                    Some(doc_id) => {
-                                        let doc_handle = match state.request_document(&doc_id).await {
-                                            Ok(doc_handle) => doc_handle,
-                                            Err(e) => {
-                                            println!("failed to load branches metadata doc: {:?}", e);
-                                            return;
-                                            }
-                                        };                                        
-        
-                                        let branches_metadata : BranchesMetadataDoc = match doc_handle.with_doc(|d| hydrate(d)) {
-                                            Ok(branches_metadata) => branches_metadata,
-                                            Err(e) => {
-                                            println!("failed to load branches metadata doc: {:?}", e);
-                                            return;
-                                            }
-                                        };
-        
-                                        state.set_main_branch_doc_id(DocumentId::from_str(&branches_metadata.main_doc_id).unwrap());
-                                        state.set_branches(&branches_metadata.branches);
-                                    }
-
-                                    None => {                                    
-                                        // Create new main branch doc
-                                        let main_branch_doc_handle = state.new_document();
-                                        main_branch_doc_handle.with_doc_mut(|d| {
-                                            let mut tx = d.transaction();
-                                            let _ = reconcile(
-                                                &mut tx,
-                                                GodotProjectDoc {
-                                                    files: HashMap::new(),
-                                                    state: HashMap::new()
-                                                },
-                                            );
-                                            tx.commit();
-                                        });
-                                    
-                                        let main_branch_doc_id = main_branch_doc_handle.document_id().to_string();
-                                        let main_branch_doc_id_clone = main_branch_doc_id.clone();
-                                        let branches =  HashMap::from([
-                                                (main_branch_doc_id,  Branch { name: String::from("main"), id: main_branch_doc_handle.document_id().to_string(), is_merged: true })                                                    
-                                            ]);
-                                        let branches_clone = branches.clone();
-                                        
-                                        // create new branches metadata doc
-                                        let branches_metadata_doc_handle = state.new_document();
-                                        branches_metadata_doc_handle.with_doc_mut(|d| {
-                                            let mut tx = d.transaction();
-                                            let _ = reconcile(
-                                                &mut tx,
-                                                BranchesMetadataDoc {
-                                                    main_doc_id: main_branch_doc_id_clone,
-                                                    branches: branches_clone
-                                                },
-                                            );
-                                            tx.commit();
-                                        });                                        
-
-
-                                        state.set_main_branch_doc_id(main_branch_doc_handle.document_id());
-                                        state.set_branches(&branches);
-                                    }
-                                }
-
-                                state.tx.unbounded_send(DriverOutputEvent::Initialized).unwrap();                  
+                            DriverInputEvent::InitBranchesMetadataDoc { doc_id } => {                            
+                                state.init_project(doc_id);
                             }
 
                             DriverInputEvent::CheckoutBranch { branch_doc_id } => {
-                              let branch_doc_handle = match state.request_document(&branch_doc_id).await {
-                                  Ok(doc_handle) => doc_handle,
-                                  Err(e) => {
-                                    println!("failed to load branch doc: {:?}", e);
-                                    return;
-                                  },
-                              };                                        
+                              state.checkout_branch(branch_doc_id);
+                            },
 
-                              let linked_doc_ids = get_linked_docs_of_branch(&branch_doc_handle);
-
-                              // @alex
-                              // todo: do this in parallel
-                              let mut linked_doc_results = Vec::new();
-                              for doc_id in linked_doc_ids {
-                                  let result = state.request_document(&doc_id).await;
-                                  linked_doc_results.push(result);
-                              }                
-
-                              if linked_doc_results.iter().any(|result| result.is_err()) {
-                                  println!("failed to checkout branch, some linked docs are missing:");
-
-                                  for result in linked_doc_results {
-                                    if let Err(e) = result {
-                                      println!("{:?}", e);
-                                    }
-                                  }
-                                  return;
-                              }
-
-                              state.set_checked_out_branch_doc_id(branch_doc_id);
+                            DriverInputEvent::CreateBranch {name} => {
+                                state.create_branch(name);
                             },
 
                             DriverInputEvent::NewDocHandle { doc_handle } => {
@@ -295,21 +206,28 @@ struct DocHandleWithType {
   heads: Vec<ChangeHash>,
 }
 
-struct DriverState {
-    doc_handles: HashMap<DocumentId, DocHandle>,
+struct RepoState {
     repo_handle: RepoHandle,
-    branches: HashMap<String, Branch>,
-    main_branch_doc_id: Option<DocumentId>,
-    checked_out_doc_id: Option<DocumentId>,
-    tx: UnboundedSender<DriverOutputEvent>,
+    doc_handles: HashMap<DocumentId, DocHandle>,
+    tx: UnboundedSender<DriverOutputEvent>
 }
 
-impl DriverState {
+impl RepoState {
+
+    fn clone_doc(&mut self, doc_handle: DocHandle) -> DocHandle {
+        let new_doc_handle = self.new_document();
+
+        let _ = doc_handle
+            .with_doc_mut(|mut main_d| new_doc_handle.with_doc_mut(|d| d.merge(&mut main_d)));        
+
+
+        return new_doc_handle
+    }
 
     fn new_document(&mut self) -> DocHandle {
         let doc_handle = self.repo_handle.new_document();
 
-        self.add_handle(doc_handle.clone());
+        self._add_handle(doc_handle.clone());
         self.tx.unbounded_send(DriverOutputEvent::DocHandleChanged { doc_handle: doc_handle.clone() }).unwrap();
 
         doc_handle
@@ -327,13 +245,13 @@ impl DriverState {
             }
         };
 
-        self.add_handle(doc_handle.clone());
+        self._add_handle(doc_handle.clone());
         self.tx.unbounded_send(DriverOutputEvent::DocHandleChanged { doc_handle: doc_handle.clone() }).unwrap();
 
         Ok(doc_handle)
     }
 
-    fn add_handle(&mut self, doc_handle: DocHandle) {
+    fn _add_handle(&mut self, doc_handle: DocHandle) {
         let doc_id = doc_handle.document_id();
         if self.doc_handles.insert(doc_id.clone(), doc_handle.clone()).is_none() {
 
@@ -342,23 +260,228 @@ impl DriverState {
 
 
         self.tx.unbounded_send(DriverOutputEvent::DocHandleChanged { doc_handle: doc_handle.clone() }).unwrap();      
+    }    
+}
+
+#[derive(Clone)]
+struct ProjectState {
+    branches_metadata_doc_handle: DocHandle,
+    main_branch_doc_handle: DocHandle,
+    checked_out_branch_doc_handle: DocHandle,
+    branches: HashMap<String, Branch>,
+    tx: UnboundedSender<DriverOutputEvent>
+}
+
+impl ProjectState {
+
+    fn add_branch(&mut self, branch: Branch) {    
+        
+        let branch_clone = branch.clone();
+        self.branches_metadata_doc_handle.with_doc_mut(|d| {   
+            let mut branches_metadata: BranchesMetadataDoc = hydrate(d).unwrap();                 
+            let mut tx = d.transaction(); 
+            branches_metadata.branches.insert(branch_clone.id.clone(), branch_clone);
+            reconcile(&mut tx, branches_metadata);
+            tx.commit();
+        });
+
+
+        self.branches.insert(branch.id.clone(), branch.clone());
+        self.tx.unbounded_send(DriverOutputEvent::BranchesUpdated { branches: self.branches.clone() }).unwrap();
     }
 
-    fn set_main_branch_doc_id(&mut self, doc_id: DocumentId) {
-        self.main_branch_doc_id = Some(doc_id);        
+    fn reconcile_branches (&self) {
+        let branches_metadata:BranchesMetadataDoc = self.main_branch_doc_handle.with_doc(|d| hydrate(d).unwrap());
+
+        self.tx.unbounded_send(DriverOutputEvent::BranchesUpdated { branches: branches_metadata.branches }).unwrap();
     }
 
-    fn set_branches(&mut self, branches: &HashMap<String, Branch>) {
-        self.branches = branches.clone();
-        self.tx.unbounded_send(DriverOutputEvent::BranchesUpdated { branches: branches.clone() }).unwrap();
+}
+
+
+struct DriverState {
+    repo: RepoState,
+    project: Option<ProjectState>,
+    tx: UnboundedSender<DriverOutputEvent>,
+}
+
+impl DriverState {
+
+    async fn init_project (&mut self, doc_id:Option<DocumentId>) {
+        match doc_id {
+            Some(doc_id) => {
+                let branches_metadata_doc_handle = match self.repo.request_document(&doc_id).await {
+                    Ok(doc_handle) => doc_handle,
+                    Err(e) => {
+                    println!("failed init, can't load branches metadata doc: {:?}", e);
+                    return;
+                    }
+                };                                        
+
+                let branches_metadata : BranchesMetadataDoc = match branches_metadata_doc_handle.with_doc(|d| hydrate(d)) {
+                    Ok(branches_metadata) => branches_metadata,
+                    Err(e) => {
+                    println!("failed init, can't hydrate metadata doc: {:?}", e);
+                    return;
+                    }
+                };
+
+                let main_branch_doc_id: DocumentId = DocumentId::from_str(&branches_metadata.main_doc_id).unwrap();
+                let main_branch_doc_handle = match self.repo.request_document(&main_branch_doc_id).await {
+                    Ok(doc_handle) => doc_handle,
+                    Err(err) => {
+                        println!("failed init, can't load main branchs doc");
+                        return
+                    }
+                };
+
+                let linked_doc_ids = get_linked_docs_of_branch(&main_branch_doc_handle);
+
+                // alex ?
+                // todo: do this in parallel
+                let mut linked_doc_results = Vec::new();
+                for doc_id in linked_doc_ids {
+                    let result = self.repo.request_document(&doc_id).await;
+                    linked_doc_results.push(result);
+                }                
+
+                if linked_doc_results.iter().any(|result| result.is_err()) {
+                    println!("failed init, couldn't load all binary docs for ");
+
+                    for result in linked_doc_results {
+                    if let Err(e) = result {
+                        println!("{:?}", e);
+                    }
+                    }
+                    return;
+                }
+
+
+                self.project = Some(ProjectState {
+                    branches_metadata_doc_handle,
+                    main_branch_doc_handle: main_branch_doc_handle.clone(),
+                    checked_out_branch_doc_handle: main_branch_doc_handle.clone(),
+                    branches: branches_metadata.branches,
+                    tx: self.tx.clone()
+                });
+            }
+
+            None => {                                    
+                // Create new main branch doc
+                let main_branch_doc_handle = self.repo.new_document();
+                main_branch_doc_handle.with_doc_mut(|d| {
+                    let mut tx = d.transaction();
+                    let _ = reconcile(
+                        &mut tx,
+                        GodotProjectDoc {
+                            files: HashMap::new(),
+                            state: HashMap::new()
+                        },
+                    );
+                    tx.commit();
+                });
+            
+                let main_branch_doc_id = main_branch_doc_handle.document_id().to_string();
+                let main_branch_doc_id_clone = main_branch_doc_id.clone();
+                let branches =  HashMap::from([
+                        (main_branch_doc_id,  Branch { name: String::from("main"), id: main_branch_doc_handle.document_id().to_string(), is_merged: true })                                                    
+                    ]);
+                let branches_clone = branches.clone();
+                
+                // create new branches metadata doc
+                let branches_metadata_doc_handle = self.repo.new_document();
+                branches_metadata_doc_handle.with_doc_mut(|d| {
+                    let mut tx = d.transaction();
+                    let _ = reconcile(
+                        &mut tx,
+                        BranchesMetadataDoc {
+                            main_doc_id: main_branch_doc_id_clone,
+                            branches: branches_clone
+                        },
+                    );
+                    tx.commit();
+                });                                        
+
+                self.project = Some(ProjectState {
+                    branches_metadata_doc_handle,
+                    main_branch_doc_handle: main_branch_doc_handle.clone(),
+                    checked_out_branch_doc_handle: main_branch_doc_handle.clone(),
+                    branches,
+                    tx: self.tx.clone()
+                });
+            }
+        }
+
+        self.tx.unbounded_send(DriverOutputEvent::Initialized).unwrap();
     }
 
-    // set checked out doc id should be only called once we made sure that all the binary files are loaded
-    // todo: is there a better way to do this that is less error prone?
-    fn set_checked_out_branch_doc_id(&mut self, doc_id: DocumentId) {
-        self.checked_out_doc_id = Some(doc_id.clone());
-        self.tx.unbounded_send(DriverOutputEvent::CheckedOutBranch { branch_doc_id: doc_id.clone() }).unwrap();
+
+    fn create_branch (&mut self, name: String) {       
+
+        let mut project = match &self.project {
+            Some(project) => project.clone(),
+            None => {
+                println!("warning: triggered create branch before project was initialized");
+                return;
+            },
+        };
+
+        let new_branch_handle = self.repo.clone_doc(project.main_branch_doc_handle.clone());
+        
+        project.add_branch(Branch { id: new_branch_handle.document_id().to_string().clone(), name: name.clone(), is_merged: false });
+        project.checked_out_branch_doc_handle = new_branch_handle.clone();
+
+        self.project = Some(project.clone());
+
+        self.tx.unbounded_send(DriverOutputEvent::BranchesUpdated { branches: project.branches.clone() }).unwrap();
+        self.tx.unbounded_send(DriverOutputEvent::CheckedOutBranch { branch_doc_id: new_branch_handle.document_id().clone() }).unwrap();
     }
+
+    async fn checkout_branch (&mut self, branch_doc_id: DocumentId) {
+        let mut project = match &self.project {
+            Some(project) => project.clone(),
+            None => {
+                println!("warning: triggered create branch before project was initialized");
+                return;
+            },
+        };
+
+        let branch_doc_handle = match self.repo.request_document(&branch_doc_id).await {
+            Ok(doc_handle) => doc_handle,
+            Err(e) => {
+              println!("failed to load branch doc: {:?}", e);
+              return;
+            },
+        };                                        
+
+        let linked_doc_ids = get_linked_docs_of_branch(&branch_doc_handle);
+
+        // alex ?
+        // todo: do this in parallel
+        let mut linked_doc_results = Vec::new();
+        for doc_id in linked_doc_ids {
+            let result = self.repo.request_document(&doc_id).await;
+            linked_doc_results.push(result);
+        }                
+
+        if linked_doc_results.iter().any(|result| result.is_err()) {
+            println!("failed to checkout branch, some linked docs are missing:");
+
+            for result in linked_doc_results {
+              if let Err(e) = result {
+                println!("{:?}", e);
+              }
+            }
+            return;
+        }
+
+        project.checked_out_branch_doc_handle = branch_doc_handle.clone();
+
+        self.project = Some(project);
+        self.tx.unbounded_send(DriverOutputEvent::CheckedOutBranch { branch_doc_id: branch_doc_handle.document_id().clone() }).unwrap();
+
+    }
+
 }
 
 fn handle_changes(handle: DocHandle) -> impl futures::Stream<Item = Vec<automerge::Patch>> + Send {
