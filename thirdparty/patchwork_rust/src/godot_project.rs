@@ -447,21 +447,14 @@ impl GodotProject_rs {
     }
 
     fn get_branches(&self) -> Vec<String> /* { name: String, id: String }[] */ {
-        todo!("not implemented");
-
-        // let branches_metadata = self.get_branches_metadata_doc();
-
-        // let mut branches: Vec<String> = vec!("name".to_string(), "main".to_string(),  "id".to_string(), "main".to_string());
-        
-        // // Add other branches
-        // for (id, branch) in branches_metadata.branches {
-        //     branches.push("name".to_string());
-        //     branches.push(branch.name);
-        //     branches.push("id".to_string());
-        //     branches.push(id);
-        // }
-
-        // branches
+        return self.branches.values().flat_map(|branch| {
+            vec![
+                "name".to_string(),
+                branch.name.clone(),
+                "id".to_string(),
+                branch.id.clone(),
+            ]
+        }).collect::<Vec<String>>();
     }
 
     fn get_checked_out_branch_id(&self) -> String {
