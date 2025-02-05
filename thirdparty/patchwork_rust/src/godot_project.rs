@@ -697,24 +697,9 @@ impl GodotProject_rs {
                                 return;
                             }            
                         };
+
+                        let (linked_doc_requests_len, linked_doc_handles) = get_linked_docs(&repo_handle, &branch_doc_handle).await;
             
-                        let linked_doc_requests = get_linked_docs_of_branch(&branch_doc_handle).into_iter().map(|doc_id| {
-                            (doc_id.clone(), repo_handle.request_document(doc_id))
-                        }).collect::<Vec<_>>();
-            
-                        let linked_doc_requests_len = linked_doc_requests.len();
-            
-                        let linked_doc_handles = futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
-                            future.map(move |result| {
-                                match result {
-                                    Ok(handle) => Some(handle),
-                                    Err(e) => {
-                                        println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
-                                        None
-                                    }
-                                }
-                            })
-                        })).await.into_iter().flatten().collect::<Vec<_>>();
             
                         if linked_doc_handles.len() != linked_doc_requests_len {
                             println!("Couldn't check out branch {:?} because some linked docs couldn't be loaded", checked_out_branch_id);
@@ -814,6 +799,29 @@ fn parse_automerge_url(url: &str) -> Option<DocumentId> {
 
     let hash = &url[PREFIX.len()..];
     DocumentId::from_str(hash).ok()
+}
+
+// return a tuple of the linked_doc_requests_len and linked_doc_handles
+pub(crate) async fn get_linked_docs(repo_handle: &RepoHandle, branch_doc_handle: &DocHandle) -> (usize, Vec<DocHandle>) {
+    let linked_doc_requests = get_linked_docs_of_branch(&branch_doc_handle).into_iter().map(|doc_id| {
+        (doc_id.clone(), repo_handle.request_document(doc_id))
+    }).collect::<Vec<_>>();
+
+    let linked_doc_requests_len = linked_doc_requests.len();
+
+    let linked_doc_handles = futures::future::join_all(linked_doc_requests.into_iter().map(|(doc_id, future)| {
+        future.map(move |result| {
+            match result {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    println!("Failed to load linked doc {:?}: {:?}", doc_id, e);
+                    None
+                }
+            }
+        })
+    })).await.into_iter().flatten().collect::<Vec<_>>();
+
+    (linked_doc_requests_len, linked_doc_handles)
 }
 
 async fn init_godot_project_state(repo_handle: &RepoHandle, doc_handle_map: DocHandleMap, maybe_branches_metadata_doc_id: Option<DocumentId>) -> (DocumentId, DocumentId) {
@@ -950,8 +958,17 @@ async fn load_new_branch_docs (branches_metadata: &BranchesMetadataDoc, repo_han
    }
 }
 
+pub(crate) fn is_branch_doc(branch_doc_handle: &DocHandle) -> bool {
+    branch_doc_handle.with_doc(|d| {
+        match d.get_obj_id(ROOT, "files") {
+            Some(_) => true,
+            None => false,
+        }
+    })
+}
 
-fn get_linked_docs_of_branch(branch_doc_handle: &DocHandle) -> Vec<DocumentId> {
+// mark this for export
+pub(crate) fn get_linked_docs_of_branch(branch_doc_handle: &DocHandle) -> Vec<DocumentId> {
     // Collect all linked doc IDs from this branch
     branch_doc_handle.with_doc(|d| {
         let files = match d.get_obj_id(ROOT, "files") {

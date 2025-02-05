@@ -15,6 +15,8 @@ use futures::{channel::mpsc::UnboundedSender, executor::block_on, FutureExt, Str
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::os::raw::c_char;
+use crate::godot_project::get_linked_docs_of_branch;
+
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
 
@@ -207,7 +209,10 @@ impl DriverState {
 
     fn add_handle(&mut self, doc_handle: DocHandle) {
         let doc_id = doc_handle.document_id();
-        self.doc_handles.insert(doc_id.clone(), doc_handle.clone());
+        if self.doc_handles.insert(doc_id.clone(), doc_handle.clone()).is_none() {
+
+            // self.tx.unbounded_send(DriverOutputEvent::DocHandleChanged { doc_handle: doc_handle.clone() }).unwrap();
+        }
 
 
         self.tx.unbounded_send(DriverOutputEvent::DocHandleChanged { doc_handle: doc_handle.clone() }).unwrap();      
@@ -218,7 +223,7 @@ fn handle_changes(handle: DocHandle) -> impl futures::Stream<Item = Vec<automerg
     futures::stream::unfold(handle, |doc_handle| async {
         let heads_before = doc_handle.with_doc(|d| d.get_heads().to_vec());
         let _ = doc_handle.changed().await;
-
+        if crate::godot_project::is_branch_doc(&doc_handle) {}
         // todo: if this is a branch doc, check if all the binary files are loaded if not don't update the heads so the user sees an old version
 
         let heads_after = doc_handle.with_doc(|d| d.get_heads().to_vec());
