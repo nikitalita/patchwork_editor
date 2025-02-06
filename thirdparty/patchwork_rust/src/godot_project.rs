@@ -18,7 +18,7 @@ use std::os::raw::c_char;
 // use godot::prelude::*;
 use tokio::{net::TcpStream, runtime::Runtime};
 
-use crate::{doc_handle_map::DocHandleMap, doc_utils::SimpleDocReader, godot_project_driver::{DriverInputEvent, DriverOutputEvent, GodotProjectDriver}};
+use crate::{doc_handle_map::{self, DocHandleMap}, doc_utils::SimpleDocReader, godot_project_driver::{DriverInputEvent, DriverOutputEvent, GodotProjectDriver}, utils::parse_automerge_url};
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
 struct BinaryFile {
@@ -79,7 +79,7 @@ struct GodotProjectState {
 pub struct GodotProject_rs {
     branches: HashMap<String, Branch>,
     doc_handles: HashMap<DocumentId, DocHandle>,
-    checked_out_branch_doc_id: Option<DocumentId>,
+    checked_out_branch_doc_handle: Option<DocHandle>,
     signal_user_data: *mut c_void,
     signal_callback: AutoMergeSignalCallback,
     driver: GodotProjectDriver,
@@ -151,7 +151,7 @@ impl GodotProject_rs {
         GodotProject_rs {
             branches: HashMap::new(),
             doc_handles: HashMap::new(),
-            checked_out_branch_doc_id: None,
+            checked_out_branch_doc_handle: None,
             signal_user_data,
             signal_callback,
             driver,
@@ -168,10 +168,8 @@ impl GodotProject_rs {
     }
 
     fn get_checked_out_branch_handle (&self) -> Option<DocHandle>  {
-        match self.checked_out_branch_doc_id.clone() {
-            Some(checked_out_branch_doc_id) => {
-               self.doc_handles.get(&checked_out_branch_doc_id).cloned()
-            }
+        match self.checked_out_branch_doc_handle.clone() {
+            Some(doc_handle) => Some(doc_handle),
             None => {
                 println!("warning: tried to access checked out doc when no branch was checked out");
                 return None
@@ -217,30 +215,70 @@ impl GodotProject_rs {
     }
 
     fn get_file(&self, path: String) -> Option<StringOrPackedByteArray> {
-        todo!("not implemented");
-        // let mut content_doc_id_result: Option<DocumentId> = None;
-        // let result = self.get_checked_out_doc_handle().with_doc(|doc| {
-        //     let files = doc.get(ROOT, "files").unwrap().unwrap().1;
-        //     // does the file exist?
-        //     let file_entry = match doc.get(files, path) {
-        //         Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
-        //         _ => return None,
+        let doc = match self.get_checked_out_branch_doc() {
+            Some(doc) => doc,
+            None => return None,
+        };
+        
+        let files = doc.get(ROOT, "files").unwrap().unwrap().1;
+        // does the file exist?
+        let file_entry = match doc.get(files, path) {
+            Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
+            _ => return None,
+        };
+
+        // try to read file as text
+        match doc.get(&file_entry, "content") {
+            Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
+                match doc.text(content) {
+                    Ok(text) => return Some(StringOrPackedByteArray::String(text.to_string())),
+                    Err(_) => {}
+                }
+            },
+            _ => {}
+        }
+
+        // ... otherwise try to read as linked binary doc    
+        doc
+            .get_string(&file_entry, "url")
+            .and_then(|url| parse_automerge_url(&url))
+            .and_then(|doc_id| self.doc_handles.get(&doc_id))
+            .and_then(|doc_handle| {
+                doc_handle.with_doc(|d| {
+                    Some(StringOrPackedByteArray::PackedByteArray(d.get_bytes(ROOT, "content").unwrap()))
+                })
+            })        
+
+
+        //     if let Some(url) = doc.get_string(&file_entry, "url") {
+
+        //         // parse doc url
+        //         let doc_id = match parse_automerge_url(&url) {
+        //             Some(url) => url,
+        //             _ => return None
+        //         };
+        //         content_doc_id_result = Some(doc_id);
         //     };
 
-        //     // try to read file as text
-        //     match doc.get(&file_entry, "content") {
-        //         Ok(Some((automerge::Value::Object(ObjType::Text), content))) => {
-        //             match doc.text(content) {
-        //                 Ok(text) => return Some(StringOrPackedByteArray::String(text.to_string())),
-        //                 Err(_) => {}
-        //             }
-        //         },
-        //         _ => {}
+        //     None
+        // });
+        // if result.is_none() {
+        //     if let Some(content_doc_id) = content_doc_id_result {
+        //         // // read content doc
+        //         let content_doc = match self.doc_handle_map.get_doc(&content_doc_id) {
+        //             Some(doc) => doc,
+        //             _ => return None
+        //         };
+
+        //         // get content of binary file
+        //         if let Some(bytes) = content_doc.get_bytes(ROOT, "content") {
+        //             return Some(StringOrPackedByteArray::PackedByteArray(bytes));
+        //         };
         //     }
+        // }
 
-        //     // ... otherwise try to read as linked binary doc
-
-
+        // result
+            
         //     if let Some(url) = doc.get_string(&file_entry, "url") {
 
         //         // parse doc url
@@ -291,87 +329,30 @@ impl GodotProject_rs {
         // })
     }
 
-
     fn get_changes(&self) -> Vec<String> /* String[]  */ {
-        todo!("not implemented");
-        // self.get_checked_out_doc_handle().with_doc(|doc| {
+        let checked_out_branch_doc = match self.get_checked_out_branch_doc() {
+            Some(doc) => doc,
+            None => return vec![],
+        };
 
-
-        // doc.get_changes(&[])
-        //     .to_vec()
-        //     .iter()
-        //     .map(|c| c.hash().to_string())
-        //     .collect::<Vec<String>>()
-        // })
+        checked_out_branch_doc.get_changes(&[])
+            .to_vec()
+            .iter()
+            .map(|c| c.hash().to_string())
+            .collect::<Vec<String>>()
     }
 
     // #[func]
     fn save_file(&self, path: String, heads: Option<Vec<ChangeHash>>, content: StringOrPackedByteArray) {
-        todo!("not implemented");
-        // // ignore if file is already up to date
-        // if let Some(stored_content) = self.get_file(path.clone()) {
-        //     if stored_content == content {
-        //         println!("file {:?} is already up to date", path.clone());
-        //         return;
-        //     }
-        // }
+          // ignore if file is already up to date
+          if let Some(stored_content) = self.get_file(path.clone()) {
+            if stored_content == content {
+                println!("file {:?} is already up to date", path.clone());
+                return;
+            }
+        }
 
-        // self.get_checked_out_doc_handle()
-        // .with_doc_mut(|d| {    
-        //         let mut tx = match heads {
-        //             Some(heads) => {
-        //                 d.transaction_at(PatchLog::inactive(TextRepresentation::String(TextEncoding::Utf8CodeUnit)), &heads)
-        //             },
-        //             None => {
-        //                 d.transaction()
-        //             }
-        //         };
-
-        //         let files = match tx.get(ROOT, "files") {
-        //             Ok(Some((automerge::Value::Object(ObjType::Map), files))) => files,
-        //             _ => panic!("Invalid project doc, doesn't have files map"),
-        //         };
-
-        //         match content {
-        //             StringOrPackedByteArray::String(content) => {
-        //                 println!("write string {:}", path);
-
-        //                 // get existing file url or create new one                        
-        //                 let file_entry = match tx.get(&files, &path) {
-        //                     Ok(Some((automerge::Value::Object(ObjType::Map), file_entry))) => file_entry,
-        //                     _ => tx.put_object(files, &path, ObjType::Map).unwrap()
-        //                 };
-
-        //                 // delete url in file entry if it previously had one
-        //                 if let Ok(Some((_, _))) = tx.get(&file_entry, "url") {
-        //                     let _ = tx.delete(&file_entry, "url");
-        //                 }
-
-        //                 // either get existing text or create new text
-        //                 let content_key = match tx.get(&file_entry, "content") {
-        //                     Ok(Some((automerge::Value::Object(ObjType::Text), content))) => content,
-        //                     _ => tx.put_object(&file_entry, "content", ObjType::Text).unwrap(),
-        //                 };
-        //                 let _ = tx.update_text(&content_key, &content);
-        //             },
-        //             StringOrPackedByteArray::PackedByteArray(content) => {
-        //                 println!("write binary {:}", path);
-
-        //                 // create content doc
-        //                 let content_doc_id = self.create_doc(|d| {
-        //                     let mut tx = d.transaction();
-        //                     let _ = tx.put(ROOT, "content", content.to_vec());
-        //                     tx.commit();
-        //                 });
-
-        //                 // write url to content doc into project doc
-        //                 let file_entry = tx.put_object(files, path, ObjType::Map);
-        //                 let _ = tx.put(file_entry.unwrap(), "url", format!("automerge:{}", content_doc_id));
-        //             },
-        //         }
-
-        //         tx.commit();
-        //     });
+        self.driver_input_tx.unbounded_send(DriverInputEvent::SaveFile { path, heads, content }).unwrap();    
     }
 
     fn merge_branch(&self, branch_id: String) {
@@ -402,29 +383,8 @@ impl GodotProject_rs {
     }
 
 
-    fn create_branch(&self, name: String) -> String {
-        todo!("not implemented");
-        // let mut branches_metadata = self.get_branches_metadata_doc();
-
-        // let main_doc_id = DocumentId::from_str(&branches_metadata.main_doc_id).unwrap();
-        // let new_doc_id = self.clone_doc(main_doc_id);
-
-        // branches_metadata.branches.insert(
-        //     new_doc_id.to_string(),
-        //     Branch {
-        //         is_merged: false,
-        //         name,
-        //         id: new_doc_id.to_string(),
-        //     },
-        // );
-
-        // self.get_branches_metadata_doc_handle().with_doc_mut(|d| {
-        //     let mut tx = d.transaction();
-        //     reconcile(&mut tx, branches_metadata).unwrap();
-        //     tx.commit();
-        // });
-
-        // new_doc_id.to_string()
+    fn create_branch(&self, name: String) {
+        self.driver_input_tx.unbounded_send(DriverInputEvent::CreateBranch { name }).unwrap();
     }
 
     // checkout branch in a separate thread
@@ -457,8 +417,10 @@ impl GodotProject_rs {
     }
 
     fn get_checked_out_branch_id(&self) -> String {
-        todo!("not implemented");
-        // return self.checked_out_doc_id.to_string();
+         match self.get_checked_out_branch_handle() {
+            Some(doc) => doc.document_id().to_string(),
+            None => return String::new(), 
+        }
     }
 
     // State api
@@ -541,18 +503,38 @@ impl GodotProject_rs {
         while let Ok(Some(event)) = self.driver_output_rx.try_next() {
             match event {
                 DriverOutputEvent::DocHandleChanged { doc_handle } => {
-                    self.doc_handles.insert(doc_handle.document_id(), doc_handle);                
+                    println!("rust: DocHandleChanged event for doc {}", doc_handle.document_id());
+                    self.doc_handles.insert(doc_handle.document_id(), doc_handle.clone());  
+
+                    if let Some(checked_out_branch_doc_handle) = self.checked_out_branch_doc_handle.as_ref() {
+                        if checked_out_branch_doc_handle.document_id() == doc_handle.document_id() {
+                            println!("rust: checked out branch doc handle changed");
+
+                            checked_out_branch_doc_handle.with_doc(|d| {
+                                let files = d.get_obj_id(ROOT, "files").unwrap();
+                                let keys = d.keys(files).collect::<Vec<String>>();
+                                println!("rust: checked out branch doc handle changed, keys: {:?}", keys);
+                            });
+
+
+                        }
+                    }
                 },
                 DriverOutputEvent::BranchesUpdated { branches } => {
+                    println!("rust: BranchesUpdated event with {} branches", branches.len());
                     self.branches = branches;
                     (self.signal_callback)(self.signal_user_data, SIGNAL_BRANCHES_CHANGED.as_ptr(), std::ptr::null(), 0);
                 },
-                DriverOutputEvent::CheckedOutBranch { branch_doc_id } => {
-                    self.checked_out_branch_doc_id = Some(branch_doc_id.clone());
-                    let doc_id_c_str = std::ffi::CString::new(format!("{}", &branch_doc_id)).unwrap();
+                DriverOutputEvent::CheckedOutBranch { branch_doc_handle } => {
+                    println!("rust: CheckedOutBranch event for doc {}", branch_doc_handle.document_id());
+                    self.checked_out_branch_doc_handle = Some(branch_doc_handle.clone());
+                    let doc_id_c_str = std::ffi::CString::new(format!("{}", &branch_doc_handle.document_id())).unwrap();
                     (self.signal_callback)(self.signal_user_data, SIGNAL_CHECKED_OUT_BRANCH.as_ptr(),  &doc_id_c_str.as_ptr(), 1);
                 },
-                DriverOutputEvent::Initialized => {
+                DriverOutputEvent::Initialized { branches, checked_out_branch_doc_handle } => {
+                    println!("rust: Initialized event");
+                    self.branches = branches;
+                    self.checked_out_branch_doc_handle = Some(checked_out_branch_doc_handle.clone());
                     (self.signal_callback)(self.signal_user_data, SIGNAL_INITIALIZED.as_ptr(), std::ptr::null(), 0);
                 },
             }
@@ -767,8 +749,11 @@ pub extern "C" fn godot_project_create_branch(godot_project: *mut GodotProject_r
         .to_str()
         .unwrap()
         .to_string();
-    let branch_id = godot_project.create_branch(name);
-    let c_string = std::ffi::CString::new(branch_id).unwrap();
+
+    godot_project.create_branch(name);
+
+    // todo: this no longer returns the branch id, so we just return an empty string 
+    let c_string = std::ffi::CString::new("").unwrap();
     c_string.into_raw()
 }
 
