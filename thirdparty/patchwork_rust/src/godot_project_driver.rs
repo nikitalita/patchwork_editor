@@ -182,13 +182,7 @@ impl GodotProjectDriver {
                             if tracked_doc_handle_ids.contains(&doc_handle_id) {
                                 continue;
                             }
-
-                            println!("rust: New doc handle: {:?}", doc_handle_id);
-
-                            tx.unbounded_send(DriverOutputEvent::DocHandleChanged { doc_handle: doc_handle.clone() }).unwrap();
-
-                            tracked_doc_handle_ids.insert(doc_handle_id);
-                            
+                            tracked_doc_handle_ids.insert(doc_handle_id);                        
                             let change_stream = handle_changes(doc_handle.clone()).filter_map(move |diff| {
                                 let doc_handle = doc_handle.clone();
                                 async move {
@@ -568,11 +562,10 @@ impl DriverState {
                         _ => tx.put_object(&file_entry, "content", ObjType::Text).unwrap(),
                     };
                     let _ = tx.update_text(&content_key, &content);
+                    tx.commit();
                 });
 
-                // todo: remove this once change listener works
-                //return vec![];
-                return vec![project.checked_out_branch_doc_handle.clone()];
+                return vec![];
             },
             StringOrPackedByteArray::PackedByteArray(content) => {
                 // create binary doc            
@@ -599,7 +592,7 @@ impl DriverState {
 
                     let file_entry = tx.put_object(files, path, ObjType::Map);
                     let _ = tx.put(file_entry.unwrap(), "url", format!("automerge:{}", &binary_doc_handle.document_id()));
-
+                    tx.commit();
                 });
 
                 return vec![binary_doc_handle];

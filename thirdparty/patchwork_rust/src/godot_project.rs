@@ -505,20 +505,6 @@ impl GodotProject_rs {
                 DriverOutputEvent::DocHandleChanged { doc_handle } => {
                     println!("rust: DocHandleChanged event for doc {}", doc_handle.document_id());
                     self.doc_handles.insert(doc_handle.document_id(), doc_handle.clone());  
-
-                    if let Some(checked_out_branch_doc_handle) = self.checked_out_branch_doc_handle.as_ref() {
-                        if checked_out_branch_doc_handle.document_id() == doc_handle.document_id() {
-                            println!("rust: checked out branch doc handle changed");
-
-                            checked_out_branch_doc_handle.with_doc(|d| {
-                                let files = d.get_obj_id(ROOT, "files").unwrap();
-                                let keys = d.keys(files).collect::<Vec<String>>();
-                                println!("rust: checked out branch doc handle changed, keys: {:?}", keys);
-                            });
-
-
-                        }
-                    }
                 },
                 DriverOutputEvent::BranchesUpdated { branches } => {
                     println!("rust: BranchesUpdated event with {} branches", branches.len());
