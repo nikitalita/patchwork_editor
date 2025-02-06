@@ -19,8 +19,10 @@ env_patchwork_editor = env_modules.Clone()
 env_patchwork_editor["disable_exceptions"] = False
 
 env_patchwork_editor.Append(CPPPATH=["."])
-env_patchwork_editor.Append(CPPPATH=["external/include"])
-env.Append(LIBPATH=[EXTERNAL_LIB_DIR])
+
+
+# env_patchwork_editor.Append(CPPPATH=["external/include"])
+# env.Append(LIBPATH=[EXTERNAL_LIB_DIR])
 
 # icon stuff
 
@@ -214,5 +216,5 @@ module_obj = []
 
 env_patchwork_editor.add_source_files(module_obj, "*.cpp")
 env_patchwork_editor.add_source_files(module_obj, "editor/*.cpp")
-build_patchwork_rust(module_obj)
+# build_patchwork_rust(module_obj)
 env.modules_sources += module_obj
