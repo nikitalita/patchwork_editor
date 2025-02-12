@@ -1,12 +1,9 @@
 #include "patchwork_editor.h"
 
-#include <core/io/file_access.h>
 #include <core/io/json.h>
-#include <core/io/resource_loader.h>
 #include <core/variant/variant.h>
 #include <editor/editor_file_system.h>
 #include <editor/editor_undo_redo_manager.h>
-#include <scene/resources/packed_scene.h>
 
 PatchworkEditor::PatchworkEditor() {
 }
@@ -79,6 +76,8 @@ void PatchworkEditor::_notification(int p_what) {
 			print_line("Entered tree");
 			break;
 		}
+		default:
+			break;
 	}
 }
 
