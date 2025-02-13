@@ -82,6 +82,14 @@ void PatchworkEditor::_notification(int p_what) {
 }
 
 void PatchworkEditor::_bind_methods() {
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_add_task", "task", "label", "steps", "can_cancel"), &PatchworkEditor::progress_add_task);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_task_step", "task", "state", "step", "force_refresh"), &PatchworkEditor::progress_task_step);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_end_task", "task"), &PatchworkEditor::progress_end_task);
+
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_add_task_bg", "task", "label", "steps"), &PatchworkEditor::progress_add_task_bg);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_task_step_bg", "task", "step"), &PatchworkEditor::progress_task_step_bg);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_end_task_bg", "task"), &PatchworkEditor::progress_end_task_bg);
+
 	ClassDB::bind_static_method(get_class_static(), "unsaved_files_open", &PatchworkEditor::unsaved_files_open);
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("detect_utf8", "utf8_buf"), &PatchworkEditor::detect_utf8);
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_recursive_dir_list", "dir", "wildcards", "absolute", "rel"), &PatchworkEditor::get_recursive_dir_list);
@@ -336,6 +344,27 @@ Vector<String> PatchworkEditor::get_recursive_dir_list(const String &p_dir, cons
 	}
 
 	return ret;
+}
+
+void PatchworkEditor::progress_add_task(const String &p_task, const String &p_label, int p_steps, bool p_can_cancel) {
+	EditorNode::get_singleton()->progress_add_task(p_task, p_label, p_steps, p_can_cancel);
+}
+
+bool PatchworkEditor::progress_task_step(const String &p_task, const String &p_state, int p_step, bool p_force_refresh) {
+	return EditorNode::get_singleton()->progress_task_step(p_task, p_state, p_step, p_force_refresh);
+}
+
+void PatchworkEditor::progress_end_task(const String &p_task) {
+	EditorNode::get_singleton()->progress_end_task(p_task);
+}
+void PatchworkEditor::progress_add_task_bg(const String &p_task, const String &p_label, int p_steps) {
+	EditorNode::get_singleton()->progress_add_task_bg(p_task, p_label, p_steps);
+}
+void PatchworkEditor::progress_task_step_bg(const String &p_task, int p_step) {
+	EditorNode::get_singleton()->progress_task_step_bg(p_task, p_step);
+}
+void PatchworkEditor::progress_end_task_bg(const String &p_task) {
+	EditorNode::get_singleton()->progress_end_task_bg(p_task);
 }
 
 PatchworkEditor::PatchworkEditor(EditorNode *p_editor) {
