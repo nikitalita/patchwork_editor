@@ -1,15 +1,18 @@
 #pragma once
 #include "core/object/class_db.h"
 #include "editor/editor_node.h"
+#include "missing_resource_container.h"
 #include "scene/main/node.h"
-class GodotProject;
 
 class PatchworkEditor : public Node {
 	GDCLASS(PatchworkEditor, Node);
 
 private:
+	Ref<FakeInspectorResource> inspector_resource;
 	EditorNode *editor = nullptr;
-	GodotProject *fs = nullptr;
+	EditorInspector *inspector = nullptr;
+	static PatchworkEditor *singleton;
+	PatchworkEditor *get_singleton();
 	void _on_filesystem_changed();
 	void _on_resources_reloaded();
 	void _on_history_changed();
@@ -25,6 +28,17 @@ private:
 	static void progress_add_task_bg(const String &p_task, const String &p_label, int p_steps);
 	static void progress_task_step_bg(const String &p_task, int p_step = -1);
 	static void progress_end_task_bg(const String &p_task);
+	static void _show_diff(Dictionary diff_dict);
+	void show_diff(Dictionary diff_dict);
+	static void _show_fake_diff();
+	void show_fake_diff();
+	Dictionary get_file_diff(const String &p_path, const String &p_path2);
+	Dictionary get_diff_obj(Object *a, Object *b, bool exclude_non_storage = true);
+	Dictionary evaluate_node_differences(Node *scene1, Node *scene2, const NodePath &path);
+	Dictionary get_diff_res(Ref<Resource> p_res, Ref<Resource> p_res2);
+
+	static EditorInspector *_get_inspector();
+	EditorInspector *get_inspector();
 
 protected:
 	void _notification(int p_what);
@@ -32,7 +46,6 @@ protected:
 
 public:
 	PatchworkEditor(EditorNode *p_editor);
-
 
 public:
 	PatchworkEditor();
