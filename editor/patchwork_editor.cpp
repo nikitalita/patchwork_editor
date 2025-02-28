@@ -90,23 +90,6 @@ void PatchworkEditor::_notification(int p_what) {
 	}
 }
 
-void PatchworkEditor::_bind_methods() {
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_add_task", "task", "label", "steps", "can_cancel"), &PatchworkEditor::progress_add_task);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_task_step", "task", "state", "step", "force_refresh"), &PatchworkEditor::progress_task_step);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_end_task", "task"), &PatchworkEditor::progress_end_task);
-
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_add_task_bg", "task", "label", "steps"), &PatchworkEditor::progress_add_task_bg);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_task_step_bg", "task", "step"), &PatchworkEditor::progress_task_step_bg);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_end_task_bg", "task"), &PatchworkEditor::progress_end_task_bg);
-
-	ClassDB::bind_static_method(get_class_static(), "unsaved_files_open", &PatchworkEditor::unsaved_files_open);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("detect_utf8", "utf8_buf"), &PatchworkEditor::detect_utf8);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_recursive_dir_list", "dir", "wildcards", "absolute", "rel"), &PatchworkEditor::get_recursive_dir_list);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_inspector"), &PatchworkEditor::_get_inspector);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("show_diff", "diff_dict"), &PatchworkEditor::_show_diff);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("show_fake_diff"), &PatchworkEditor::_show_fake_diff);
-}
-
 bool PatchworkEditor::unsaved_files_open() {
 	auto opened_scenes = EditorNode::get_editor_data().get_edited_scenes();
 	for (int i = 0; i < opened_scenes.size(); i++) {
@@ -379,18 +362,15 @@ void PatchworkEditor::progress_end_task_bg(const String &p_task) {
 	EditorNode::get_singleton()->progress_end_task_bg(p_task);
 }
 
-void PatchworkEditor::_show_diff(Dictionary diff_dict) {
-	singleton->show_diff(diff_dict);
-}
 
-void PatchworkEditor::show_diff(Dictionary diff_dict) {
+Dictionary PatchworkEditor::get_diff(Dictionary changed_files_dict) {
 	// files = [{
 	// 	path: "path/to/file",
 	// 	change: "modified",
 	// 	old_content: "res://path/to/file_old",
 	// 	new_content: "res://path/to/file_new"
 	// }, ...]
-	Array files = diff_dict["files"];
+	Array files = changed_files_dict["files"];
 	Dictionary display_diff;
 	for (const auto &d : files) {
 		Dictionary dict = d;
@@ -412,32 +392,7 @@ void PatchworkEditor::show_diff(Dictionary diff_dict) {
 			display_diff[path] = diff;
 		}
 	}
-	inspector_resource = Ref<FakeInspectorResource>(memnew(FakeInspectorResource));
-	inspector_resource->set_recording_properties(true);
-	for (const auto &file : display_diff.keys()) {
-		inspector_resource->add_file_diff(file, display_diff[file]);
-	}
-	inspector_resource->set_recording_properties(false);
-	inspector->edit(inspector_resource.ptr());
-}
-
-void PatchworkEditor::_show_fake_diff() {
-	singleton->show_fake_diff();
-}
-
-void PatchworkEditor::show_fake_diff() {
-	Dictionary dictionary;
-
-	dictionary["type"] = "resource_changed";
-	Dictionary props;
-	props["name"] = "test";
-	props["thingy"] = 5;
-	dictionary["props"] = props;
-	inspector_resource = Ref<FakeInspectorResource>(memnew(FakeInspectorResource));
-	inspector_resource->set_recording_properties(true);
-	inspector_resource->add_file_diff("res://test.tres", dictionary);
-	inspector_resource->set_recording_properties(false);
-	inspector->edit(inspector_resource.ptr());
+	return display_diff;
 }
 
 Dictionary PatchworkEditor::get_file_diff(const String &p_path, const String &p_path2) {
@@ -449,7 +404,7 @@ Dictionary PatchworkEditor::get_file_diff(const String &p_path, const String &p_
 	return get_diff_res(res1, res2);
 }
 
-bool deep_equals(Variant a, Variant b, bool exclude_non_storage = true) {
+bool PatchworkEditor::deep_equals(Variant a, Variant b, bool exclude_non_storage) {
 	if (a.get_type() != b.get_type()) {
 		return false;
 	}
@@ -490,6 +445,12 @@ bool deep_equals(Variant a, Variant b, bool exclude_non_storage = true) {
 		case Variant::OBJECT: {
 			Object *obj_a = a;
 			Object *obj_b = b;
+			if (obj_a == obj_b) {
+				return true;
+			}
+			if (obj_a == nullptr || obj_b == nullptr) {
+				return false;
+			}
 			if (obj_a->get_class() != obj_b->get_class()) {
 				return false;
 			}
@@ -552,20 +513,31 @@ Dictionary PatchworkEditor::get_diff_obj(Object *a, Object *b, bool exclude_non_
 	return diff;
 }
 
-void get_child_node_paths(Node *node_a, HashSet<NodePath> &paths) {
+void get_child_node_paths(Node *node_a, HashSet<NodePath> &paths, const String &curr_path = ".") {
 	for (int i = 0; i < node_a->get_child_count(); i++) {
 		auto child_a = node_a->get_child(i);
-		paths.insert(child_a->get_path());
-		get_child_node_paths(child_a, paths);
+		auto new_path = curr_path.path_join(child_a->get_name());
+		paths.insert(new_path);
+		get_child_node_paths(child_a, paths, new_path);
 	}
 }
 
 Dictionary PatchworkEditor::evaluate_node_differences(Node *scene1, Node *scene2, const NodePath &path) {
 	Dictionary result;
 	bool is_root = path == "." || path.is_empty();
-	auto node1 = is_root ? scene1 : scene1->get_node(path);
-	auto node2 = is_root ? scene2 : scene2->get_node(path);
+	Node *node1 = scene1;
+	Node *node2 = scene2;
 	if (!is_root) {
+		if (node1->has_node(path)) {
+			node1 = node1->get_node(path);
+		} else {
+			node1 = nullptr;
+		}
+		if (node2->has_node(path)) {
+			node2 = node2->get_node(path);
+		} else {
+			node2 = nullptr;
+		}
 		result["path"] = path;
 	} else {
 		result["path"] = "." + scene1->get_name();
@@ -597,6 +569,9 @@ Dictionary PatchworkEditor::get_diff_res(Ref<Resource> p_res, Ref<Resource> p_re
 		result["new_type"] = p_res2->get_class();
 		return result;
 	}
+	// ensure that the references stick around
+	result["res_old"] = p_res;
+	result["res_new"] = p_res2;
 	if (p_res->get_class() != "PackedScene") {
 		result["type"] = "resource_changed";
 		result["props"] = get_diff_obj(p_res.ptr(), p_res2.ptr(), true);
@@ -614,6 +589,8 @@ Dictionary PatchworkEditor::get_diff_res(Ref<Resource> p_res, Ref<Resource> p_re
 	for (auto &path : paths) {
 		Dictionary value1 = (evaluate_node_differences(scene1, scene2, path));
 		if (value1.size() > 0) {
+			value1["res_old"] = p_res;
+			value1["res_new"] = p_res2;
 			node_diffs.push_back(value1);
 		}
 	}
@@ -621,22 +598,36 @@ Dictionary PatchworkEditor::get_diff_res(Ref<Resource> p_res, Ref<Resource> p_re
 	result["nodes"] = node_diffs;
 	return result;
 }
-EditorInspector *PatchworkEditor::_get_inspector() {
-	return singleton->get_inspector();
-}
 
-EditorInspector *PatchworkEditor::get_inspector() {
-	return inspector;
-}
 PatchworkEditor *PatchworkEditor::singleton = nullptr;
 
 PatchworkEditor::PatchworkEditor(EditorNode *p_editor) {
 	singleton = this;
 	editor = p_editor;
-	inspector = memnew(EditorInspector);
 	// EditorUndoRedoManager::get_singleton()->connect(SNAME("history_changed"), callable_mp(this, &PatchworkEditor::_on_history_changed));
 	//
 	// fs = GodotProject::create("");
 	// this->add_child(fs);
 	// EditorFileSystem::get_singleton()->connect("filesystem_changed", callable_mp(this, &PatchworkEditor::signal_callback));
+}
+
+void PatchworkEditor::_bind_methods() {
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_add_task", "task", "label", "steps", "can_cancel"), &PatchworkEditor::progress_add_task);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_task_step", "task", "state", "step", "force_refresh"), &PatchworkEditor::progress_task_step);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_end_task", "task"), &PatchworkEditor::progress_end_task);
+
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_add_task_bg", "task", "label", "steps"), &PatchworkEditor::progress_add_task_bg);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_task_step_bg", "task", "step"), &PatchworkEditor::progress_task_step_bg);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("progress_end_task_bg", "task"), &PatchworkEditor::progress_end_task_bg);
+
+	ClassDB::bind_static_method(get_class_static(), "unsaved_files_open", &PatchworkEditor::unsaved_files_open);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("detect_utf8", "utf8_buf"), &PatchworkEditor::detect_utf8);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_recursive_dir_list", "dir", "wildcards", "absolute", "rel"), &PatchworkEditor::get_recursive_dir_list);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_diff", "changed_files_dict"), &PatchworkEditor::get_diff);
+
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_file_diff", "old_path", "new_path"), &PatchworkEditor::get_file_diff);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("deep_equals", "a", "b", "exclude_non_storage"), &PatchworkEditor::deep_equals, DEFVAL(true));
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_diff_obj", "a", "b", "exclude_non_storage"), &PatchworkEditor::get_diff_obj, DEFVAL(true));
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("evaluate_node_differences", "scene1", "scene2", "path"), &PatchworkEditor::evaluate_node_differences);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_diff_res", "res1", "res2"), &PatchworkEditor::get_diff_res);
 }

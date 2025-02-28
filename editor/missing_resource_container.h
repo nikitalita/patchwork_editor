@@ -45,8 +45,11 @@ class FakeInspectorResource : public Resource {
 
 protected:
 	bool _set(const StringName &p_name, const Variant &p_value);
+	bool get_from_props_dict(const Dictionary &props, const String &p_name, Variant &r_ret) const;
+	Dictionary get_prop_dict_for_getset(String fq_prop_name, String &real_prop_name) const;
 	bool _get(const StringName &p_name, Variant &r_ret) const;
-	void add_props_to_list(const Dictionary &props, List<PropertyInfo> *p_list) const;
+	void add_props_to_list(const String &name, const Dictionary &props, List<PropertyInfo> *p_list, const String &node_name = "") const;
+	bool add_property_list_from_diff(String path, Dictionary diff, List<PropertyInfo> *p_list) const;
 	void _get_property_list(List<PropertyInfo> *p_list) const;
 
 	static void _bind_methods();
@@ -55,7 +58,7 @@ public:
 	void set_original_class(const String &p_class);
 	String get_original_class() const;
 	void add_file_diff(const String &file, const Dictionary &props);
-
+	void add_diff(const Dictionary &props);
 	void set_recording_properties(bool p_enable);
 	bool is_recording_properties() const;
 

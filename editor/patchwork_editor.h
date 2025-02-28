@@ -10,7 +10,6 @@ class PatchworkEditor : public Node {
 private:
 	Ref<FakeInspectorResource> inspector_resource;
 	EditorNode *editor = nullptr;
-	EditorInspector *inspector = nullptr;
 	static PatchworkEditor *singleton;
 	PatchworkEditor *get_singleton();
 	void _on_filesystem_changed();
@@ -28,17 +27,12 @@ private:
 	static void progress_add_task_bg(const String &p_task, const String &p_label, int p_steps);
 	static void progress_task_step_bg(const String &p_task, int p_step = -1);
 	static void progress_end_task_bg(const String &p_task);
-	static void _show_diff(Dictionary diff_dict);
-	void show_diff(Dictionary diff_dict);
-	static void _show_fake_diff();
-	void show_fake_diff();
-	Dictionary get_file_diff(const String &p_path, const String &p_path2);
-	Dictionary get_diff_obj(Object *a, Object *b, bool exclude_non_storage = true);
-	Dictionary evaluate_node_differences(Node *scene1, Node *scene2, const NodePath &path);
-	Dictionary get_diff_res(Ref<Resource> p_res, Ref<Resource> p_res2);
-
-	static EditorInspector *_get_inspector();
-	EditorInspector *get_inspector();
+	static Dictionary get_diff(Dictionary changed_files_dict);
+	static Dictionary get_file_diff(const String &p_path, const String &p_path2);
+	static bool deep_equals(Variant a, Variant b, bool exclude_non_storage = true);
+	static Dictionary get_diff_obj(Object *a, Object *b, bool exclude_non_storage = true);
+	static Dictionary evaluate_node_differences(Node *scene1, Node *scene2, const NodePath &path);
+	static Dictionary get_diff_res(Ref<Resource> p_res, Ref<Resource> p_res2);
 
 protected:
 	void _notification(int p_what);
